@@ -59,7 +59,7 @@ def train(network, trainloader, opti, epoch):
 
     network = network.train()
 
-    for batch_idx, (real_img, labels) in enumerate(trainloader):
+    for batch_idx, (real_img, labels, gt_path) in enumerate(trainloader):
         opti.zero_grad()
         real_img = real_img.to(init_device, non_blocking=True)
         labels = labels.to(init_device, non_blocking=True)
@@ -136,7 +136,7 @@ def test(network, testloader, epoch):
 
     network = network.eval()
     with torch.no_grad():
-        for batch_idx, (real_img, labels) in enumerate(testloader):
+        for batch_idx, (real_img, labels, gt_path) in enumerate(testloader):
             real_img = real_img.to(init_device, non_blocking=True)
             labels = labels.to(init_device, non_blocking=True)
             # direct spike input
@@ -162,12 +162,14 @@ def test(network, testloader, epoch):
             print(
                 f'Test[{epoch}/{max_epoch}] [{batch_idx}/{len(testloader)}] Loss: {loss_meter.avg}, RECONS: {recons_meter.avg}, DISTANCE: {dist_meter.avg}')
 
-            if batch_idx == len(testloader) - 1:
-                os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/', exist_ok=True)
-                torchvision.utils.save_image((real_img + 1) / 2,
-                                             f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_input.png')
-                torchvision.utils.save_image((x_recon + 1) / 2,
-                                             f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_recons.png')
+            if batch_idx == 0:
+                ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 10)
+                if (epoch + 1) % ad_eval_epochs == 0:
+                    os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/', exist_ok=True)
+                    torchvision.utils.save_image((real_img + 1) / 2,
+                                                 f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_input.png')
+                    torchvision.utils.save_image((x_recon + 1) / 2,
+                                                 f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_recons.png')
                 writer.add_images('Test/input_img', (real_img + 1) / 2, epoch)
                 writer.add_images('Test/recons_img', (x_recon + 1) / 2, epoch)
 
@@ -196,14 +198,18 @@ def test(network, testloader, epoch):
 
 
 def sample(network, epoch, batch_size=128):
+    if batch_size <= 0:
+        return
     network = network.eval()
     with torch.no_grad():
         sampled_x, sampled_z = network.sample(batch_size)
         writer.add_images('Sample/sample_img', (sampled_x + 1) / 2, epoch)
         writer.add_image('Sample/mean_sampled_z', sampled_z.mean(0).unsqueeze(0), epoch)
         writer.add_histogram('Sample/mean_sampled_z_distribution', sampled_z.mean(0).sum(-1), epoch)
-        os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/', exist_ok=True)
-        torchvision.utils.save_image((sampled_x + 1) / 2, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/epoch{epoch}_sample.png')
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 10)
+        if (epoch + 1) % ad_eval_epochs == 0:
+            os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/', exist_ok=True)
+            torchvision.utils.save_image((sampled_x + 1) / 2, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/epoch{epoch}_sample.png')
 
 
 def calc_inception_score(network, epoch, batch_size=256):
@@ -350,17 +356,25 @@ if __name__ == '__main__':
 
     net = net.to(init_device)
 
+    start_epoch = 0
     if args.checkpoint is not None:
         checkpoint_path = args.checkpoint
         checkpoint = torch.load(checkpoint_path)
-        net.load_state_dict(checkpoint)
+        if isinstance(checkpoint, dict) and 'net' in checkpoint:
+            net.load_state_dict(checkpoint['net'])
+            start_epoch = checkpoint.get('epoch', -1) + 1
+        else:
+            net.load_state_dict(checkpoint)
     optimizer = torch.optim.AdamW(net.parameters(),
                                   lr=glv.network_config['lr'],
                                   betas=(0.9, 0.999),
                                   weight_decay=0.001)
 
+    if args.checkpoint is not None and isinstance(checkpoint, dict) and 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
     best_loss = 1e8
-    for e in range(glv.network_config['epochs']):
+    for e in range(start_epoch, glv.network_config['epochs']):
 
         write_weight_hist(net, e)
         if network_config['scheduled']:
@@ -369,14 +383,27 @@ if __name__ == '__main__':
         train_loss = train(net, train_loader, optimizer, e)
         test_loss = test(net, test_loader, e)
 
-        torch.save(net.state_dict(), f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
+        checkpoint_dict = {
+            'net': net.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': e
+        }
+        torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
         if test_loss < best_loss:
             best_loss = test_loss
-            torch.save(net.state_dict(), f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
+            torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
 
         sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
         # calc_inception_score(net, e, batch_size=glv.network_config['sample_batch_size'])
         # calc_autoencoder_frechet_distance(net, e)
         # calc_clean_fid(net, e)
+
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
+        if (e + 1) % ad_eval_epochs == 0 and dataset_name in ['mvtec', 'visa']:
+            try:
+                from ad_eval import evaluate_ad
+                evaluate_ad(net, test_loader, init_device, e, args, dataset_name)
+            except Exception as ex:
+                print(f"AD Eval error: {ex}")
 
     writer.close()

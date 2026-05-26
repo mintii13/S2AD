@@ -59,7 +59,7 @@ def train(network, trainloader, opti, epoch):
 
     network = network.train()
 
-    for batch_idx, (real_img, labels) in enumerate(trainloader):
+    for batch_idx, (real_img, labels, gt_path) in enumerate(trainloader):
         opti.zero_grad()
         real_img = real_img.to(init_device, non_blocking=True)
         labels = labels.to(init_device, non_blocking=True)
@@ -125,7 +125,7 @@ def test(network, testloader, epoch):
 
     network = network.eval()
     with torch.no_grad():
-        for batch_idx, (real_img, labels) in enumerate(testloader):
+        for batch_idx, (real_img, labels, gt_path) in enumerate(testloader):
             real_img = real_img.to(init_device, non_blocking=True)
             labels = labels.to(init_device, non_blocking=True)
             # direct spike input
@@ -146,12 +146,14 @@ def test(network, testloader, epoch):
             print(
                 f'Test[{epoch}/{max_epoch}] [{batch_idx}/{len(testloader)}] Loss: {loss_meter.avg}, RECONS: {recons_meter.avg}, DISTANCE: {dist_meter.avg}')
 
-            if batch_idx == len(testloader) - 1:
-                os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/', exist_ok=True)
-                torchvision.utils.save_image((real_img + 1) / 2,
-                                             f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_input.png')
-                torchvision.utils.save_image((x_recon + 1) / 2,
-                                             f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_recons.png')
+            if batch_idx == 0:
+                ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 10)
+                if (epoch + 1) % ad_eval_epochs == 0:
+                    os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/', exist_ok=True)
+                    torchvision.utils.save_image((real_img + 1) / 2,
+                                                 f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_input.png')
+                    torchvision.utils.save_image((x_recon + 1) / 2,
+                                                 f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/test/epoch{epoch}_recons.png')
                 writer.add_images('Test/input_img', (real_img + 1) / 2, epoch)
                 writer.add_images('Test/recons_img', (x_recon + 1) / 2, epoch)
 
@@ -176,14 +178,18 @@ def test(network, testloader, epoch):
 
 
 def sample(network, epoch, batch_size=128):
+    if batch_size <= 0:
+        return
     network = network.eval()
     with torch.no_grad():
         sampled_x, sampled_z_p = network.sample(batch_size)
         writer.add_images('Sample/sample_img', (sampled_x + 1) / 2, epoch)
         writer.add_image('Sample/mean_sampled_z_p', sampled_z_p.mean(0).unsqueeze(0), epoch)
         writer.add_histogram('Sample/mean_sampled_z_p_distribution', sampled_z_p.mean(0).sum(-1), epoch)
-        os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/', exist_ok=True)
-        torchvision.utils.save_image((sampled_x + 1) / 2, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/epoch{epoch}_sample.png')
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 10)
+        if (epoch + 1) % ad_eval_epochs == 0:
+            os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/', exist_ok=True)
+            torchvision.utils.save_image((sampled_x + 1) / 2, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/imgs/sample/epoch{epoch}_sample.png')
 
 
 def calc_inception_score(network, epoch, batch_size=256):
@@ -339,6 +345,104 @@ if __name__ == '__main__':
         raise Exception('Unrecognized dataset name.')
     logging.info("dataset loaded")
 
+
+if __name__ == '__main__':
+    seed_all()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-name', default='tmp', type=str)
+    parser.add_argument('-config', action='store', dest='config', help='The path of config file')
+    parser.add_argument('-checkpoint', action='store', dest='checkpoint',
+                        help='The path of checkpoint, if use checkpoint')
+    parser.add_argument('-device', type=int)
+    parser.add_argument('-project_save_path', default='./results_esvae', type=str)
+    parser.add_argument('-category', default='bottle', type=str)
+
+    try:
+        args = parser.parse_args()
+    except:
+        parser.print_help()
+        exit(0)
+
+    if args.config is None:
+        raise Exception('Unrecognized config file.')
+
+    if args.device is None:
+        init_device = torch.device("cuda:0")
+    else:
+        init_device = torch.device(f"cuda:{args.device}")
+
+    logging.info("start parsing settings")
+
+    params = parse(args.config)
+    network_config = params['Network']
+
+    logging.info("finish parsing settings")
+    logging.info(network_config)
+    print(network_config)
+
+    glv.init(network_config, [args.device])
+    dataset_name = glv.network_config['dataset']
+    data_path = glv.network_config['data_path']
+
+    lr = glv.network_config['lr']
+    sample_layer_lr_times = glv.network_config['sample_layer_lr_times']
+    distance_lambda = glv.network_config['distance_lambda']
+    loss_func = glv.network_config['loss_func']
+    mmd_type = glv.network_config['mmd_type']
+    latent_dim = glv.network_config['latent_dim']
+    try:
+        add_name = glv.network_config['add_name']
+    except:
+        add_name = None
+
+    n_steps = glv.network_config['n_steps']
+    args.name = f'esvae_T{n_steps}_lr-{lr}_lambda-{distance_lambda}_loss_func-{loss_func}_mmd_type-{mmd_type}_sample_layer_lr_times-{sample_layer_lr_times}-latent_dim-{latent_dim}'
+
+    if dataset_name in ['mvtec', 'visa']:
+        args.name = f'{dataset_name}_{args.category}_{args.name}'
+    else:
+        args.name = f'vanilla_{dataset_name}_{args.name}'
+
+    if add_name is not None:
+        args.name = add_name + '-' + args.name
+
+    os.makedirs(f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}', exist_ok=True)
+    writer = SummaryWriter(log_dir=f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/tb')
+    logging.basicConfig(filename=f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}.log', level=logging.INFO)
+
+    # Check whether a GPU is available
+    if torch.cuda.is_available():
+        cuda.init()
+        c_device = aboutCudaDevices()
+        print(c_device.info())
+        print("selected device: ", args.device)
+    else:
+        raise Exception("only support gpu")
+
+    logging.info("dataset loading...")
+    if dataset_name == "MNIST":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_mnist(data_path)
+    elif dataset_name == "FashionMNIST":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_fashionmnist(data_path)
+    elif dataset_name == "CIFAR10":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_cifar10(data_path)
+    elif dataset_name == "CelebA":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_celebA(data_path)
+    elif dataset_name.lower() == "mvtec":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_mvtec(data_path, args.category)
+    elif dataset_name.lower() == "visa":
+        data_path = os.path.expanduser(data_path)
+        train_loader, test_loader = load_dataset_snn.load_visa(data_path, args.category)
+    else:
+        raise Exception('Unrecognized dataset name.')
+    logging.info("dataset loaded")
+
     if network_config['model'] == 'ESVAE':
         net = esvae.ESVAE(device=init_device, distance_lambda=distance_lambda, mmd_type=mmd_type)
     elif network_config['model'] == 'ESVAE_large':
@@ -348,10 +452,15 @@ if __name__ == '__main__':
 
     net = net.to(init_device)
 
+    start_epoch = 0
     if args.checkpoint is not None:
         checkpoint_path = args.checkpoint
         checkpoint = torch.load(checkpoint_path)
-        net.load_state_dict(checkpoint)
+        if isinstance(checkpoint, dict) and 'net' in checkpoint:
+            net.load_state_dict(checkpoint['net'])
+            start_epoch = checkpoint.get('epoch', -1) + 1
+        else:
+            net.load_state_dict(checkpoint)
 
     params = list(net.named_parameters())
     param_group = [
@@ -364,11 +473,14 @@ if __name__ == '__main__':
                                   betas=(0.9, 0.999),
                                   weight_decay=0.001)
 
+    if args.checkpoint is not None and isinstance(checkpoint, dict) and 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
     best_loss = 1e8
     best_inception_score = 1e-8
     best_autoencoder_dist = 1e8
     best_fid = 1e8
-    for e in range(glv.network_config['epochs']):
+    for e in range(start_epoch, glv.network_config['epochs']):
 
         write_weight_hist(net, e)
         if network_config['scheduled']:
@@ -377,10 +489,15 @@ if __name__ == '__main__':
         train_loss = train(net, train_loader, optimizer, e)
         test_loss = test(net, test_loader, e)
 
-        torch.save(net.state_dict(), f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
+        checkpoint_dict = {
+            'net': net.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': e
+        }
+        torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
         if test_loss < best_loss:
             best_loss = test_loss
-            torch.save(net.state_dict(), f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
+            torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
 
         sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
         if dataset_name not in ['mvtec', 'visa']:
@@ -402,4 +519,17 @@ if __name__ == '__main__':
                 best_fid = fid
                 torch.save({'net': net.state_dict(), 'epoch': e}, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_fid.pth')
 
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
+        if (e + 1) % ad_eval_epochs == 0 and dataset_name in ['mvtec', 'visa']:
+            try:
+                from ad_eval import evaluate_ad
+                evaluate_ad(net, test_loader, init_device, e, args, dataset_name)
+            except Exception as ex:
+                import traceback
+                print(f"AD Eval error: {ex}")
+                traceback.print_exc()
+
     writer.close()
+
+if __name__ == '__main__':
+    main()

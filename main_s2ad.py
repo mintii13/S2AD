@@ -1,0 +1,442 @@
+import argparse
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
+from torchvision import models
+import random
+from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score
+from spikingjelly.activation_based import ann2snn, functional
+import setproctitle
+
+import global_v as glv
+from network_parser import parse
+from datasets.load_dataset_snn import load_mvtec, load_visa
+from ad_eval import save_anomaly_map, compute_pro_metric
+
+setproctitle.setproctitle("python_s2ad")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 1 - Backbone Encoder
+# ═══════════════════════════════════════════════════════════════════════════
+
+class BackboneEncoder(nn.Module):
+    def __init__(self, backbone='resnet18', layers='layer23'):
+        super().__init__()
+        self.backbone_name = backbone
+        self.layers = layers
+        self._build_backbone(backbone)
+        
+    def _build_backbone(self, backbone):
+        if backbone in ['resnet18', 'resnet34', 'resnet50', 'wide_resnet50_2', 'wide_resnet101_2']:
+            if backbone == 'resnet18':
+                model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+            elif backbone == 'resnet34':
+                model = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
+            elif backbone == 'resnet50':
+                model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+            elif backbone == 'wide_resnet50_2':
+                model = models.wide_resnet50_2(weights=models.Wide_ResNet50_2_Weights.IMAGENET1K_V1)
+            elif backbone == 'wide_resnet101_2':
+                model = models.wide_resnet101_2(weights=models.Wide_ResNet101_2_Weights.IMAGENET1K_V1)
+            self.stem = nn.Sequential(model.conv1, model.bn1, model.relu, model.maxpool)
+            self.layer1 = model.layer1
+            self.layer2 = model.layer2
+            self.layer3 = model.layer3
+            self.is_resnet = True
+            return
+        
+        self.is_resnet = False
+        if backbone.startswith('vgg'):
+            variants = {'vgg11': (models.vgg11, 8, 15, 22), 'vgg13': (models.vgg13, 6, 11, 16),
+                        'vgg16': (models.vgg16, 8, 15, 22), 'vgg19': (models.vgg19, 9, 16, 25)}
+            creator, idx1, idx2, idx3 = variants[backbone]
+            model = creator(weights='IMAGENET1K_V1').features
+            self.output_indices = [idx1, idx2, idx3]
+        elif backbone == 'alexnet':
+            model = models.alexnet(weights='IMAGENET1K_V1').features
+            self.output_indices = [4, 7, 9]
+        elif backbone == 'mobilenet_v2':
+            model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1).features
+            self.output_indices = [3, 10, 17]
+        elif backbone == 'mobilenet_v3_large':
+            model = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V1).features
+            self.output_indices = [3, 8, 12]
+        elif backbone in ['densenet121', 'densenet169']:
+            model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1).features if backbone == 'densenet121' else models.densenet169(weights=models.DenseNet169_Weights.IMAGENET1K_V1).features
+            self.output_indices = [4, 6, 8]
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone}")
+        
+        self.features = model
+        self.output_indices = sorted(self.output_indices)
+    
+    def forward(self, x):
+        if self.is_resnet:
+            x = self.stem(x)
+            f1 = self.layer1(x)
+            f2 = self.layer2(f1)
+            f3 = self.layer3(f2)
+            outputs = [f1, f2, f3]
+        else:
+            outputs = []
+            for i, layer in enumerate(self.features):
+                x = layer(x)
+                if i in self.output_indices:
+                    outputs.append(x)
+            while len(outputs) < 3: outputs.append(x)
+            if len(outputs) > 3: outputs = outputs[:3]
+        
+        if self.layers == 'layer1': return (outputs[0],)
+        elif self.layers == 'layer2': return (outputs[1],)
+        elif self.layers == 'layer3': return (outputs[2],)
+        elif self.layers == 'layer12': return (outputs[0], outputs[1])
+        elif self.layers == 'layer23': return (outputs[1], outputs[2])
+        elif self.layers == 'layer123': return tuple(outputs)
+        else: return (outputs[1], outputs[2])
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 2 - SNN Conversion
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_snn_encoder(ann_encoder, calib_loader, device, mode='max'):
+    ann_encoder.eval()
+    
+    class AdapterLoader:
+        def __init__(self, loader): self.loader = loader
+        def __iter__(self):
+            for batch in self.loader: yield batch[0], batch[1]
+        def __len__(self): return len(self.loader)
+    
+    adapter = AdapterLoader(calib_loader)
+    converter_mode = mode if mode == 'max' else float(mode)
+    
+    converter = ann2snn.Converter(dataloader=adapter, device=device, mode=converter_mode, momentum=0.1)
+    snn_encoder = converter(ann_encoder)
+    for module in snn_encoder.modules():
+        if hasattr(module, 'output'): module.output = True
+        if hasattr(module, 'out_spike'): module.out_spike = True
+
+    print(f"  ANN2SNN conversion complete (mode={converter_mode})")
+    return snn_encoder
+
+def get_layer_indices_and_names(layers):
+    mapping = {
+        'layer1': ([0], ['layer1']), 'layer2': ([0], ['layer2']), 'layer3': ([0], ['layer3']),
+        'layer12': ([0, 1], ['layer1', 'layer2']), 'layer23': ([0, 1], ['layer2', 'layer3']),
+        'layer123': ([0, 1, 2], ['layer1', 'layer2', 'layer3']),
+    }
+    return mapping.get(layers, ([0, 1], ['layer2', 'layer3']))
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 3 - Normal Statistics
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='layer23'):
+    snn_encoder.eval()
+    layer_indices, layer_names = get_layer_indices_and_names(layers)
+    
+    sum_rates = {name: None for name in layer_names}
+    sum_sq_rates = {name: None for name in layer_names}
+    max_rates = {name: 0.0 for name in layer_names}
+    count = 0
+    
+    with torch.no_grad():
+        for imgs, _, _ in normal_loader:
+            imgs = imgs.to(device)
+            B = imgs.shape[0]
+            functional.reset_net(snn_encoder)
+            spike_acc = {name: None for name in layer_names}
+            for t in range(timesteps):
+                outputs = snn_encoder(imgs)
+                for idx, name in zip(layer_indices, layer_names):
+                    feat = outputs[idx]
+                    spike = (feat > 0).float()
+                    if spike_acc[name] is None: spike_acc[name] = spike
+                    else: spike_acc[name] += spike
+            for name in layer_names:
+                rate = spike_acc[name] / timesteps
+                if sum_rates[name] is None:
+                    sum_rates[name] = rate.sum(dim=0).cpu()
+                    sum_sq_rates[name] = (rate ** 2).sum(dim=0).cpu()
+                else:
+                    sum_rates[name] += rate.sum(dim=0).cpu()
+                    sum_sq_rates[name] += (rate ** 2).sum(dim=0).cpu()
+                current_max = rate.max().item()
+                if current_max > max_rates[name]: max_rates[name] = current_max
+            count += B
+    
+    means, stats = {}, {}
+    for name in layer_names:
+        mean = sum_rates[name] / count
+        var = torch.clamp((sum_sq_rates[name] / count) - (mean ** 2), min=0.0)
+        std = torch.sqrt(var + 1e-8)
+        means[name] = mean
+        stats[name] = {'mean': mean, 'std': std, 'max_rate': max_rates[name]}
+    
+    sum_abs_dev = {name: 0.0 for name in layer_names}
+    count = 0
+    with torch.no_grad():
+        for imgs, _, _ in normal_loader:
+            imgs = imgs.to(device)
+            B = imgs.shape[0]
+            functional.reset_net(snn_encoder)
+            spike_acc = {name: None for name in layer_names}
+            for t in range(timesteps):
+                outputs = snn_encoder(imgs)
+                for idx, name in zip(layer_indices, layer_names):
+                    feat = outputs[idx]
+                    spike = (feat > 0).float()
+                    if spike_acc[name] is None: spike_acc[name] = spike
+                    else: spike_acc[name] += spike
+            for name in layer_names:
+                rate = spike_acc[name] / timesteps
+                abs_dev = torch.abs(rate - means[name].to(device)).mean().item()
+                sum_abs_dev[name] += abs_dev * B
+            count += B
+    
+    for name in layer_names:
+        mad = sum_abs_dev[name] / count
+        stats[name]['mad'] = mad
+        print(f'    {name}: mean={stats[name]["mean"].mean().item():.4f}, max_rate={stats[name]["max_rate"]:.4f}, std={stats[name]["std"].mean().item():.4f}, mad={mad:.6f}')
+    return stats
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 4 - Evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers='layer23'):
+    functional.reset_net(snn_encoder)
+    layer_indices, layer_names = get_layer_indices_and_names(layers)
+    spike_acc = {name: None for name in layer_names}
+    with torch.no_grad():
+        for t in range(timesteps):
+            outputs = snn_encoder(img_tensor)
+            for idx, name in zip(layer_indices, layer_names):
+                feat = outputs[idx]
+                spike = (feat > 0).float()
+                if spike_acc[name] is None: spike_acc[name] = spike
+                else: spike_acc[name] += spike
+    return {name: spike_acc[name] / timesteps for name in layer_names}
+
+def _get_membrane_score(snn_encoder):
+    for name, module in snn_encoder.named_modules():
+        if 'IFNode' in str(type(module)) and hasattr(module, 'v') and module.v is not None:
+            return module.v.pow(2).mean(dim=1).squeeze(0)
+    return None
+
+def score_image(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
+    snn_encoder.eval()
+    img_tensor = img_tensor.to(device)
+    rates = get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers)
+    
+    deviations = {}
+    for layer_name, rate in rates.items():
+        mean = normal_stats[layer_name]['mean'].to(device)
+        std = normal_stats[layer_name]['std'].to(device)
+        z_score = (rate[0] - mean) / std
+        deviations[layer_name] = torch.abs(z_score).mean(dim=0)
+    
+    if len(deviations) == 1:
+        score_spatial = list(deviations.values())[0]
+    else:
+        target_name = list(deviations.keys())[0]
+        target_res = deviations[target_name].shape
+        if combine_method == 'simple':
+            combined = torch.zeros_like(deviations[target_name])
+            for layer_name, dev in deviations.items():
+                if dev.shape != target_res: dev = F.interpolate(dev.unsqueeze(0).unsqueeze(0), size=target_res, mode='bilinear', align_corners=False).squeeze()
+                combined += dev
+            score_spatial = combined / len(deviations)
+        else:
+            weighted_sum, total_weight = None, 0.0
+            for layer_name, dev in deviations.items():
+                if dev.shape != target_res: dev = F.interpolate(dev.unsqueeze(0).unsqueeze(0), size=target_res, mode='bilinear', align_corners=False).squeeze()
+                weight = 1.0 / (normal_stats[layer_name]['mad'] + 1e-8)
+                total_weight += weight
+                if weighted_sum is None: weighted_sum = dev * weight
+                else: weighted_sum += dev * weight
+            score_spatial = weighted_sum / total_weight
+    
+    if use_membrane:
+        v_score = _get_membrane_score(snn_encoder)
+        if v_score is not None:
+            v_score_up = F.interpolate(v_score.unsqueeze(0).unsqueeze(0), size=score_spatial.shape, mode='bilinear', align_corners=False).squeeze()
+            score_spatial = score_spatial * (1.0 + 0.5 * (v_score_up / (v_score_up.max() + 1e-8)))
+    
+    score_map = F.interpolate(score_spatial.unsqueeze(0).unsqueeze(0).float(), size=(img_size, img_size), mode='bilinear', align_corners=False).squeeze().cpu().numpy()
+    return score_map, float(np.max(score_map))
+
+def evaluate(snn_encoder, test_dataset, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name):
+    import cv2
+    img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps = [], [], [], [], [], []
+    file_paths = test_dataset.files if hasattr(test_dataset, 'files') else [None] * len(test_dataset)
+    
+    for i in range(len(test_dataset)):
+        img_t, lbl, gt_path = test_dataset[i]
+        score_map, img_score = score_image(snn_encoder, img_t.unsqueeze(0), normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method)
+        img_scores.append(img_score); img_labels.append(lbl)
+        
+        if save_maps and maps_dir:
+            subfolder_name = 'abnormal' if lbl == 1 else 'good'
+            if file_paths[i]:
+                parts = os.path.normpath(file_paths[i]).split(os.sep)
+                if 'test' in parts and parts.index('test') + 1 < len(parts): subfolder_name = parts[parts.index('test') + 1]
+                elif 'bad' in parts: subfolder_name = parts[parts.index('bad') + 1] if parts.index('bad') + 1 < len(parts) else 'bad'
+            
+            save_dir = os.path.join(maps_dir, subfolder_name)
+            if file_paths[i] and os.path.exists(file_paths[i]):
+                orig_img = cv2.resize(cv2.cvtColor(cv2.imread(file_paths[i]), cv2.COLOR_BGR2RGB), (img_size, img_size))
+            else:
+                from ad_eval import IMAGENET_MEAN, IMAGENET_STD
+                mean, std = torch.tensor(IMAGENET_MEAN).view(3,1,1), torch.tensor(IMAGENET_STD).view(3,1,1)
+                orig_img = (img_t.cpu() * std + mean).clamp(0,1).permute(1,2,0).numpy()
+                orig_img = (orig_img * 255).astype(np.uint8)
+            
+            gt_mask = None
+            if lbl == 1 and gt_path and os.path.exists(gt_path):
+                gt_mask = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
+                gt_mask = (gt_mask > 127).astype(np.uint8) * 255
+            save_anomaly_map(orig_img, score_map, gt_mask, save_dir, i)
+        
+        if lbl == 1 and gt_path and os.path.exists(gt_path):
+            gt = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
+            gt_bin = (gt > 127).astype(int)
+            pix_scores.extend(score_map.flatten())
+            pix_labels.extend(gt_bin.flatten())
+            gt_masks.append(gt_bin)
+            anomaly_maps.append(score_map)
+            
+    img_auc = roc_auc_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
+    img_ap = average_precision_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
+    prec, rec, _ = precision_recall_curve(img_labels, img_scores)
+    img_f1 = np.max(2 * (prec * rec) / (prec + rec + 1e-8)) if len(prec) > 0 else 0.0
+    
+    pix_auc = roc_auc_score(pix_labels, pix_scores) if pix_labels else 0.0
+    pix_ap = average_precision_score(pix_labels, pix_scores) if pix_labels else 0.0
+    if pix_labels:
+        pprec, prec_rec, _ = precision_recall_curve(pix_labels, pix_scores)
+        pix_f1 = np.max(2 * (pprec * prec_rec) / (pprec + prec_rec + 1e-8)) if len(pprec) > 0 else 0.0
+    else: pix_f1 = 0.0
+    pro_score = compute_pro_metric(gt_masks, anomaly_maps) if gt_masks else 0.0
+    return {'img_auc': img_auc, 'img_ap': img_ap, 'img_f1': img_f1, 'pix_auc': pix_auc, 'pix_ap': pix_ap, 'pix_f1': pix_f1, 'pro': pro_score}, img_scores, img_labels
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 5 - Main
+# ═══════════════════════════════════════════════════════════════════════════
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+def main():
+    seed_everything(42)
+    g = torch.Generator(); g.manual_seed(42)
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-name', type=str, required=True, help='Category name')
+    parser.add_argument('-config', type=str, required=True, help='Path to yaml config')
+    parser.add_argument('-project_save_path', type=str, default='./results_s2ad')
+    args = parser.parse_args()
+    
+    config = parse(args.config)['Network']
+    config['batch_size'] = config.get('batch_size', 16)
+    config['input_size'] = config.get('input_size', 256)
+    glv.network_config = config
+    os.makedirs(args.project_save_path, exist_ok=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    net_config = glv.network_config
+    dataset_name = net_config['dataset']
+    backbone = net_config.get('backbone', 'resnet18')
+    layers = net_config.get('layers', 'layer23')
+    timesteps = net_config.get('timesteps', [16])
+    use_membrane = net_config.get('use_membrane', False)
+    snn_mode = net_config.get('snn_mode', 'max')
+    calib_samples = net_config.get('calib_samples', 500)
+    combine_method = net_config.get('combine_method', 'mad_weighted')
+    save_maps = net_config.get('save_anomaly_maps', False)
+    img_size = net_config['input_size']
+    
+    print('=' * 60)
+    print(f'S2AD - Statistical SNN-based Anomaly Detection')
+    print(f'  Category: {args.name} ({dataset_name})')
+    print(f'  Backbone: {backbone} | Layers: {layers}')
+    print(f'  Timesteps: {timesteps}')
+    print('=' * 60)
+    
+    print('\n[1/4] Building encoder...')
+    ann_encoder = BackboneEncoder(backbone=backbone, layers=layers).to(device)
+    
+    print('\n[2/4] Loading normal dataset...')
+    if dataset_name == 'mvtec':
+        train_loader, test_loader = load_mvtec(net_config['data_path'], args.name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
+    else:
+        train_loader, test_loader = load_visa(net_config['data_path'], args.name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
+        
+    full_normal_ds = train_loader.dataset
+    if 0 < calib_samples < len(full_normal_ds):
+        calib_loader = DataLoader(Subset(full_normal_ds, list(range(calib_samples))), batch_size=net_config['batch_size'], shuffle=False, num_workers=2, generator=g)
+    else:
+        calib_loader = train_loader
+        
+    print(f'  Normal set: {len(full_normal_ds)} images')
+    
+    print('\n[3/4] Converting ANN to SNN...')
+    snn_encoder = build_snn_encoder(ann_encoder, calib_loader, device, mode=snn_mode)
+    
+    print('\n[4/4] Evaluating across timesteps...')
+    print(f'\n{"Timestep":>8} | {"Img AUC":>8} | {"Img AP":>8} | {"Img F1":>8} | {"Pix AUC":>8} | {"Pix AP":>8} | {"Pix F1":>8} | {"PRO":>8} | {"mAD":>8}')
+    print('-' * 102)
+    
+    results = {}
+    firing_rate_stats = {}
+    for T in timesteps:
+        normal_stats = compute_normal_stats(snn_encoder, train_loader, device, T, layers)
+        
+        firing_rate_stats[T] = {}
+        for name, stats in normal_stats.items():
+            firing_rate_stats[T][name] = {
+                'mean': stats['mean'].mean().item(),
+                'std': stats['std'].mean().item(),
+                'max': stats['max_rate'],
+                'mad': stats['mad']
+            }
+            
+        maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", args.name, f"T{T}") if save_maps else None
+        
+        metrics, _, _ = evaluate(snn_encoder, test_loader.dataset, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, args.name)
+        mAD_score = (metrics["img_auc"] + metrics["img_ap"] + metrics["img_f1"] + metrics["pix_auc"] + metrics["pix_ap"] + metrics["pix_f1"] + metrics["pro"]) / 7.0
+        metrics["mad_metric"] = mAD_score
+        results[T] = metrics
+        print(f'{T:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f}')
+        
+    out_path = os.path.join(args.project_save_path, f'{args.name}_s2ad_results.txt')
+    with open(out_path, 'w') as f:
+        f.write(f"S2AD Results - {args.name}\n")
+        f.write(f"{'=' * 50}\n")
+        f.write(f"Backbone: {backbone} | Layers: {layers}\n")
+        f.write(f"Combine Method: {combine_method}\n")
+        f.write(f"SNN Mode: {snn_mode}\n")
+        f.write(f"\n{'Timestep':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8}\n")
+        f.write('-' * 105 + '\n')
+        for T in sorted(results.keys()):
+            f.write(f'{T:8d} | {results[T]["img_auc"]:8.4f} | {results[T]["img_ap"]:8.4f} | {results[T]["img_f1"]:8.4f} | {results[T]["pix_auc"]:8.4f} | {results[T]["pix_ap"]:8.4f} | {results[T]["pix_f1"]:8.4f} | {results[T]["pro"]:8.4f} | {results[T]["mad_metric"]:8.4f}\n')
+            
+        f.write(f"\n\nFiring Rate Statistics:\n")
+        f.write(f"{'=' * 50}\n")
+        for T in sorted(firing_rate_stats.keys()):
+            f.write(f"\nTimestep T={T}:\n")
+            for layer_name, stats in firing_rate_stats[T].items():
+                f.write(f"  {layer_name}: mean={stats['mean']:.6f}, max={stats['max']:.6f}, std={stats['std']:.6f}, mAD={stats['mad']:.6f}\n")
+    print(f'\nResults saved: {out_path}')
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,16 @@
+Network:
+  epochs: 150
+  batch_size: 16
+  sample_batch_size: 16
+  n_steps: 4
+  dataset: "visa"
+  in_channels: 3
+  data_path: "/home/minhtringuyen/ANN2SNN/dataloader/datasets/visa"
+  lr: 0.001
+  n_class: 1
+  latent_dim: 128
+  input_size: 256
+  model: "FSVAE"
+  k: 20
+  scheduled: true
+  loss_func: 'mmd'

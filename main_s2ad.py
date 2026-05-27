@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import models
 import random
 from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score
-from spikingjelly.activation_based import ann2snn, functional
+from spikingjelly.activation_based import ann2snn, functional, layer
 import setproctitle
 
 import global_v as glv
@@ -119,7 +119,17 @@ def build_snn_encoder(ann_encoder, calib_loader, device, mode='max'):
         if hasattr(module, 'output'): module.output = True
         if hasattr(module, 'out_spike'): module.out_spike = True
 
-    print(f"  ANN2SNN conversion complete (mode={converter_mode})")
+    def wrap_stateless(m):
+        for name, child in m.named_children():
+            if isinstance(child, (nn.Conv2d, nn.BatchNorm2d, nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear)):
+                setattr(m, name, layer.SeqToANNContainer(child))
+            else:
+                wrap_stateless(child)
+                
+    wrap_stateless(snn_encoder)
+    functional.set_step_mode(snn_encoder, 'm')
+
+    print(f"  ANN2SNN conversion complete (mode={converter_mode}, wrapped for Multi-step)")
     return snn_encoder
 
 def get_layer_indices_and_names(layers):
@@ -148,16 +158,15 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
             imgs = imgs.to(device)
             B = imgs.shape[0]
             functional.reset_net(snn_encoder)
-            spike_acc = {name: None for name in layer_names}
-            for t in range(timesteps):
-                outputs = snn_encoder(imgs)
-                for idx, name in zip(layer_indices, layer_names):
-                    feat = outputs[idx]
-                    spike = (feat > 0).float()
-                    if spike_acc[name] is None: spike_acc[name] = spike
-                    else: spike_acc[name] += spike
-            for name in layer_names:
-                rate = spike_acc[name] / timesteps
+            functional.reset_net(snn_encoder)
+            
+            imgs_T = imgs.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+            outputs = snn_encoder(imgs_T)
+            
+            for idx, name in zip(layer_indices, layer_names):
+                feat = outputs[idx]
+                spike = (feat > 0).float()
+                rate = spike.mean(dim=0)
                 if sum_rates[name] is None:
                     sum_rates[name] = rate.sum(dim=0).cpu()
                     sum_sq_rates[name] = (rate ** 2).sum(dim=0).cpu()
@@ -183,16 +192,14 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
             imgs = imgs.to(device)
             B = imgs.shape[0]
             functional.reset_net(snn_encoder)
-            spike_acc = {name: None for name in layer_names}
-            for t in range(timesteps):
-                outputs = snn_encoder(imgs)
-                for idx, name in zip(layer_indices, layer_names):
-                    feat = outputs[idx]
-                    spike = (feat > 0).float()
-                    if spike_acc[name] is None: spike_acc[name] = spike
-                    else: spike_acc[name] += spike
-            for name in layer_names:
-                rate = spike_acc[name] / timesteps
+            
+            imgs_T = imgs.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+            outputs = snn_encoder(imgs_T)
+            
+            for idx, name in zip(layer_indices, layer_names):
+                feat = outputs[idx]
+                spike = (feat > 0).float()
+                rate = spike.mean(dim=0)
                 abs_dev = torch.abs(rate - means[name].to(device)).mean().item()
                 sum_abs_dev[name] += abs_dev * B
             count += B
@@ -210,16 +217,17 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
 def get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers='layer23'):
     functional.reset_net(snn_encoder)
     layer_indices, layer_names = get_layer_indices_and_names(layers)
-    spike_acc = {name: None for name in layer_names}
+    rates = {}
     with torch.no_grad():
-        for t in range(timesteps):
-            outputs = snn_encoder(img_tensor)
-            for idx, name in zip(layer_indices, layer_names):
-                feat = outputs[idx]
-                spike = (feat > 0).float()
-                if spike_acc[name] is None: spike_acc[name] = spike
-                else: spike_acc[name] += spike
-    return {name: spike_acc[name] / timesteps for name in layer_names}
+        imgs_T = img_tensor.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+        outputs = snn_encoder(imgs_T)
+        
+        for idx, name in zip(layer_indices, layer_names):
+            feat = outputs[idx]
+            spike = (feat > 0).float()
+            rates[name] = spike.mean(dim=0)
+            
+    return rates
 
 def _get_membrane_score(snn_encoder):
     for name, module in snn_encoder.named_modules():
@@ -227,7 +235,7 @@ def _get_membrane_score(snn_encoder):
             return module.v.pow(2).mean(dim=1).squeeze(0)
     return None
 
-def score_image(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
+def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
     rates = get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers)
@@ -236,78 +244,75 @@ def score_image(snn_encoder, img_tensor, normal_stats, device, timesteps, layers
     for layer_name, rate in rates.items():
         mean = normal_stats[layer_name]['mean'].to(device)
         std = normal_stats[layer_name]['std'].to(device)
-        z_score = (rate[0] - mean) / std
-        deviations[layer_name] = torch.abs(z_score).mean(dim=0)
+        z_score = (rate - mean) / std
+        deviations[layer_name] = torch.abs(z_score).mean(dim=1)
     
     if len(deviations) == 1:
         score_spatial = list(deviations.values())[0]
     else:
         target_name = list(deviations.keys())[0]
-        target_res = deviations[target_name].shape
+        target_res = deviations[target_name].shape[1:]
         if combine_method == 'simple':
             combined = torch.zeros_like(deviations[target_name])
             for layer_name, dev in deviations.items():
-                if dev.shape != target_res: dev = F.interpolate(dev.unsqueeze(0).unsqueeze(0), size=target_res, mode='bilinear', align_corners=False).squeeze()
+                if dev.shape[1:] != target_res: dev = F.interpolate(dev.unsqueeze(1), size=target_res, mode='bilinear', align_corners=False).squeeze(1)
                 combined += dev
             score_spatial = combined / len(deviations)
         else:
             weighted_sum, total_weight = None, 0.0
             for layer_name, dev in deviations.items():
-                if dev.shape != target_res: dev = F.interpolate(dev.unsqueeze(0).unsqueeze(0), size=target_res, mode='bilinear', align_corners=False).squeeze()
+                if dev.shape[1:] != target_res: dev = F.interpolate(dev.unsqueeze(1), size=target_res, mode='bilinear', align_corners=False).squeeze(1)
                 weight = 1.0 / (normal_stats[layer_name]['mad'] + 1e-8)
                 total_weight += weight
                 if weighted_sum is None: weighted_sum = dev * weight
                 else: weighted_sum += dev * weight
             score_spatial = weighted_sum / total_weight
-    
-    if use_membrane:
-        v_score = _get_membrane_score(snn_encoder)
-        if v_score is not None:
-            v_score_up = F.interpolate(v_score.unsqueeze(0).unsqueeze(0), size=score_spatial.shape, mode='bilinear', align_corners=False).squeeze()
-            score_spatial = score_spatial * (1.0 + 0.5 * (v_score_up / (v_score_up.max() + 1e-8)))
-    
-    score_map = F.interpolate(score_spatial.unsqueeze(0).unsqueeze(0).float(), size=(img_size, img_size), mode='bilinear', align_corners=False).squeeze().cpu().numpy()
-    return score_map, float(np.max(score_map))
+            
+    score_maps = F.interpolate(score_spatial.unsqueeze(1).float(), size=(img_size, img_size), mode='bilinear', align_corners=False).squeeze(1).cpu().numpy()
+    img_scores = [float(np.max(sm)) for sm in score_maps]
+    return score_maps, img_scores
 
-def evaluate(snn_encoder, test_dataset, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name):
+def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name):
     import cv2
     img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps = [], [], [], [], [], []
-    file_paths = test_dataset.files if hasattr(test_dataset, 'files') else [None] * len(test_dataset)
     
-    for i in range(len(test_dataset)):
-        img_t, lbl, gt_path = test_dataset[i]
-        score_map, img_score = score_image(snn_encoder, img_t.unsqueeze(0), normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method)
-        img_scores.append(img_score); img_labels.append(lbl)
+    for imgs, lbls, gt_paths in test_loader:
+        score_maps, batch_img_scores = score_image_batch(snn_encoder, imgs, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method)
         
-        if save_maps and maps_dir:
-            subfolder_name = 'abnormal' if lbl == 1 else 'good'
-            if file_paths[i]:
-                parts = os.path.normpath(file_paths[i]).split(os.sep)
-                if 'test' in parts and parts.index('test') + 1 < len(parts): subfolder_name = parts[parts.index('test') + 1]
-                elif 'bad' in parts: subfolder_name = parts[parts.index('bad') + 1] if parts.index('bad') + 1 < len(parts) else 'bad'
+        for b in range(imgs.size(0)):
+            score_map = score_maps[b]
+            img_score = batch_img_scores[b]
+            lbl = lbls[b].item()
+            gt_path = gt_paths[b]
             
-            save_dir = os.path.join(maps_dir, subfolder_name)
-            if file_paths[i] and os.path.exists(file_paths[i]):
-                orig_img = cv2.resize(cv2.cvtColor(cv2.imread(file_paths[i]), cv2.COLOR_BGR2RGB), (img_size, img_size))
-            else:
+            img_scores.append(img_score)
+            img_labels.append(lbl)
+            
+            if save_maps and maps_dir:
+                subfolder_name = 'abnormal' if lbl == 1 else 'good'
+                save_dir = os.path.join(maps_dir, subfolder_name)
+                os.makedirs(save_dir, exist_ok=True)
+                
                 from ad_eval import IMAGENET_MEAN, IMAGENET_STD
                 mean, std = torch.tensor(IMAGENET_MEAN).view(3,1,1), torch.tensor(IMAGENET_STD).view(3,1,1)
-                orig_img = (img_t.cpu() * std + mean).clamp(0,1).permute(1,2,0).numpy()
+                orig_img = (imgs[b].cpu() * std + mean).clamp(0,1).permute(1,2,0).numpy()
                 orig_img = (orig_img * 255).astype(np.uint8)
             
             gt_mask = None
             if lbl == 1 and gt_path and os.path.exists(gt_path):
                 gt_mask = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
                 gt_mask = (gt_mask > 127).astype(np.uint8) * 255
-            save_anomaly_map(orig_img, score_map, gt_mask, save_dir, i)
+            
+            if save_maps and maps_dir:
+                save_anomaly_map(orig_img, score_map, gt_mask, save_dir, len(img_scores) - 1)
         
-        if lbl == 1 and gt_path and os.path.exists(gt_path):
-            gt = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
-            gt_bin = (gt > 127).astype(int)
-            pix_scores.extend(score_map.flatten())
-            pix_labels.extend(gt_bin.flatten())
-            gt_masks.append(gt_bin)
-            anomaly_maps.append(score_map)
+            if lbl == 1 and gt_path and os.path.exists(gt_path):
+                gt = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
+                gt_bin = (gt > 127).astype(int)
+                pix_scores.extend(score_map.flatten())
+                pix_labels.extend(gt_bin.flatten())
+                gt_masks.append(gt_bin)
+                anomaly_maps.append(score_map)
             
     img_auc = roc_auc_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
     img_ap = average_precision_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
@@ -393,14 +398,17 @@ def main():
     print('\n[3/4] Converting ANN to SNN...')
     snn_encoder = build_snn_encoder(ann_encoder, calib_loader, device, mode=snn_mode)
     
+    import time
     print('\n[4/4] Evaluating across timesteps...')
-    print(f'\n{"Timestep":>8} | {"Img AUC":>8} | {"Img AP":>8} | {"Img F1":>8} | {"Pix AUC":>8} | {"Pix AP":>8} | {"Pix F1":>8} | {"PRO":>8} | {"mAD":>8}')
-    print('-' * 102)
+    print(f'\n{"Timestep":>8} | {"Img AUC":>8} | {"Img AP":>8} | {"Img F1":>8} | {"Pix AUC":>8} | {"Pix AP":>8} | {"Pix F1":>8} | {"PRO":>8} | {"mAD":>8} | {"Train(s)":>8} | {"Test(s)":>7} | {"FPS":>7}')
+    print('-' * 135)
     
     results = {}
     firing_rate_stats = {}
     for T in timesteps:
+        start_train = time.time()
         normal_stats = compute_normal_stats(snn_encoder, train_loader, device, T, layers)
+        train_time = time.time() - start_train
         
         firing_rate_stats[T] = {}
         for name, stats in normal_stats.items():
@@ -413,11 +421,18 @@ def main():
             
         maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", args.name, f"T{T}") if save_maps else None
         
-        metrics, _, _ = evaluate(snn_encoder, test_loader.dataset, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, args.name)
+        start_test = time.time()
+        metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, args.name)
+        test_time = time.time() - start_test
+        fps = len(test_loader.dataset) / test_time if test_time > 0 else 0
+        
         mAD_score = (metrics["img_auc"] + metrics["img_ap"] + metrics["img_f1"] + metrics["pix_auc"] + metrics["pix_ap"] + metrics["pix_f1"] + metrics["pro"]) / 7.0
         metrics["mad_metric"] = mAD_score
+        metrics["train_time"] = train_time
+        metrics["test_time"] = test_time
+        metrics["fps"] = fps
         results[T] = metrics
-        print(f'{T:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f}')
+        print(f'{T:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f} | {metrics["train_time"]:8.1f} | {metrics["test_time"]:7.1f} | {metrics["fps"]:7.1f}')
         
     out_path = os.path.join(args.project_save_path, f'{args.name}_s2ad_results.txt')
     with open(out_path, 'w') as f:
@@ -426,10 +441,10 @@ def main():
         f.write(f"Backbone: {backbone} | Layers: {layers}\n")
         f.write(f"Combine Method: {combine_method}\n")
         f.write(f"SNN Mode: {snn_mode}\n")
-        f.write(f"\n{'Timestep':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8}\n")
-        f.write('-' * 105 + '\n')
+        f.write(f"\n{'Timestep':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'Train(s)':>8} | {'Test(s)':>7} | {'FPS':>7}\n")
+        f.write('-' * 135 + '\n')
         for T in sorted(results.keys()):
-            f.write(f'{T:8d} | {results[T]["img_auc"]:8.4f} | {results[T]["img_ap"]:8.4f} | {results[T]["img_f1"]:8.4f} | {results[T]["pix_auc"]:8.4f} | {results[T]["pix_ap"]:8.4f} | {results[T]["pix_f1"]:8.4f} | {results[T]["pro"]:8.4f} | {results[T]["mad_metric"]:8.4f}\n')
+            f.write(f'{T:8d} | {results[T]["img_auc"]:8.4f} | {results[T]["img_ap"]:8.4f} | {results[T]["img_f1"]:8.4f} | {results[T]["pix_auc"]:8.4f} | {results[T]["pix_ap"]:8.4f} | {results[T]["pix_f1"]:8.4f} | {results[T]["pro"]:8.4f} | {results[T]["mad_metric"]:8.4f} | {results[T]["train_time"]:8.1f} | {results[T]["test_time"]:7.1f} | {results[T]["fps"]:7.1f}\n')
             
         f.write(f"\n\nFiring Rate Statistics:\n")
         f.write(f"{'=' * 50}\n")

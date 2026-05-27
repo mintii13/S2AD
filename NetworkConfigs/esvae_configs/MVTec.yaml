@@ -3,12 +3,12 @@ Network:
   batch_size: 8
   data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
   dataset: mvtec
-  distance_lambda: 0.1
+  distance_lambda: 0.0125
   epochs: 300
   in_channels: 3
   input_size: 256
   k: 20
-  latent_dim: 128
+  latent_dim: 1024
   loss_func: mmd
   lr: 0.001
   mmd_type: linear

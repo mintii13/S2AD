@@ -87,7 +87,10 @@ def compute_pro_metric(gt_masks, anomaly_maps, fpr_limit=0.3):
     
     return float(pro_auc)
 
+import time
+
 def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
+    start_test_time = time.time()
     net.eval()
     img_scores, img_labels = [], []
     pix_scores, pix_labels = [], []
@@ -138,7 +141,7 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
                     orig_img = orig_img.clamp(0,1).permute(1,2,0).numpy()
                     orig_img = (orig_img * 255).astype(np.uint8)
                     save_anomaly_map(orig_img, score_map, gt_mask, save_dir, i * img.size(0) + b)
-                
+
                 if label == 1 and gt_p:
                     if gt_mask is not None:
                         gt_bin = (gt_mask > 127).astype(int)
@@ -146,6 +149,10 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
                         pix_labels.extend(gt_bin.flatten())
                         gt_masks.append(gt_bin)
                         anomaly_maps.append(score_map)
+                        
+    test_time = time.time() - start_test_time
+    total_imgs = len(img_scores)
+    fps = total_imgs / test_time if test_time > 0 else 0
                         
     img_auc = roc_auc_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
     img_ap = average_precision_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
@@ -173,13 +180,10 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
     
     with open(out_path, 'a') as f:
         if is_new_file:
-            header = f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8}"
-            f.write(header + '\n')
-            f.write('-' * 102 + '\n')
-            print(header)
-            print('-' * 102)
+            f.write(f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'TestTime':>8} | {'FPS':>8}\n")
+            f.write('-' * 125 + '\n')
             
-        row = f'{epoch:8d} | {img_auc:8.4f} | {img_ap:8.4f} | {img_f1:8.4f} | {pix_auc:8.4f} | {pix_ap:8.4f} | {pix_f1:8.4f} | {pro_score:8.4f} | {mAD_score:8.4f}'
+        row = f'{epoch:8d} | {img_auc:8.4f} | {img_ap:8.4f} | {img_f1:8.4f} | {pix_auc:8.4f} | {pix_ap:8.4f} | {pix_f1:8.4f} | {pro_score:8.4f} | {mAD_score:8.4f} | {test_time:8.2f} | {fps:8.2f}'
         f.write(row + '\n')
         print(row)
         

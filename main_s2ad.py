@@ -235,6 +235,34 @@ def _get_membrane_score(snn_encoder):
             return module.v.pow(2).mean(dim=1).squeeze(0)
     return None
 
+class HardwareFriendlyZScoreAbs(nn.Module):
+    def __init__(self, mean, std):
+        super().__init__()
+        # mean, std have shape (C, H, W)
+        self.C, self.H, self.W = mean.shape
+        
+        # 1. 1-to-1 Synaptic Connections for Z-Score (Neuromorphic mapping)
+        # Instead of shared Conv2d, each spatial neuron has its own weight/bias.
+        self.w = nn.Parameter(1.0 / (std + 1e-8)) # (C, H, W)
+        self.b = nn.Parameter(-mean / (std + 1e-8)) # (C, H, W)
+
+    def forward(self, x):
+        # 1. Spatially unshared Z-score
+        z = x * self.w.unsqueeze(0) + self.b.unsqueeze(0)
+        
+        # 2. Dual Neuron Absolute Value
+        # Positive stream
+        z_pos = F.relu(z)
+        # Negative stream (inhibitory weight)
+        z_neg = F.relu(-z)
+        
+        # 3. Sum over channels (synaptic integration)
+        # out = 1/C * sum(z_pos + z_neg)
+        z_abs = z_pos + z_neg
+        out = z_abs.mean(dim=1)
+        
+        return out
+
 def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
@@ -244,8 +272,11 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
     for layer_name, rate in rates.items():
         mean = normal_stats[layer_name]['mean'].to(device)
         std = normal_stats[layer_name]['std'].to(device)
-        z_score = (rate - mean) / std
-        deviations[layer_name] = torch.abs(z_score).mean(dim=1)
+        
+        hw_layer = HardwareFriendlyZScoreAbs(mean, std).to(device)
+        hw_layer.eval()
+        with torch.no_grad():
+            deviations[layer_name] = hw_layer(rate)
     
     if len(deviations) == 1:
         score_spatial = list(deviations.values())[0]

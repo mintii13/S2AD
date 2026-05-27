@@ -3,11 +3,11 @@ Network:
   data_path: "/home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec"
   input_size: 256
   batch_size: 16
-  backbone: "resnet34"
+  backbone: "alexnet"
   layers: "layer123"
-  snn_mode: "0.1"
+  snn_mode: "0.9"
   timesteps: [4, 8, 16]
   use_membrane: False
   calib_samples: -1
   combine_method: "mad_weighted"
-  save_anomaly_maps: True
+  save_anomaly_maps: False

@@ -263,6 +263,29 @@ class HardwareFriendlyZScoreAbs(nn.Module):
         
         return out
 
+class HardwareFriendlyInterpolator(nn.Module):
+    def __init__(self, in_shape, out_shape):
+        super().__init__()
+        H_in, W_in = in_shape
+        H_out, W_out = out_shape
+        self.out_shape = out_shape
+        
+        # Biến phép nội suy thành các kết nối Neuromorphic Synapse (Linear Layer)
+        self.linear = nn.Linear(H_in * W_in, H_out * W_out, bias=False)
+        
+        # Dùng ma trận đơn vị để "trích xuất" chính xác bộ trọng số Bilinear
+        with torch.no_grad():
+            identity = torch.eye(H_in * W_in).view(H_in * W_in, 1, H_in, W_in)
+            mapped = F.interpolate(identity, size=(H_out, W_out), mode='bilinear', align_corners=False)
+            W_matrix = mapped.view(H_in * W_in, H_out * W_out)
+            self.linear.weight.data = W_matrix.t() # (out_features, in_features)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x_flat = x.view(B, -1)
+        y_flat = self.linear(x_flat)
+        return y_flat.view(B, self.out_shape[0], self.out_shape[1])
+
 def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
@@ -286,20 +309,31 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
         if combine_method == 'simple':
             combined = torch.zeros_like(deviations[target_name])
             for layer_name, dev in deviations.items():
-                if dev.shape[1:] != target_res: dev = F.interpolate(dev.unsqueeze(1), size=target_res, mode='bilinear', align_corners=False).squeeze(1)
+                if dev.shape[1:] != target_res:
+                    interpolator = HardwareFriendlyInterpolator(dev.shape[1:], target_res).to(device)
+                    interpolator.eval()
+                    with torch.no_grad():
+                        dev = interpolator(dev)
                 combined += dev
             score_spatial = combined / len(deviations)
         else:
             weighted_sum, total_weight = None, 0.0
             for layer_name, dev in deviations.items():
-                if dev.shape[1:] != target_res: dev = F.interpolate(dev.unsqueeze(1), size=target_res, mode='bilinear', align_corners=False).squeeze(1)
+                if dev.shape[1:] != target_res:
+                    interpolator = HardwareFriendlyInterpolator(dev.shape[1:], target_res).to(device)
+                    interpolator.eval()
+                    with torch.no_grad():
+                        dev = interpolator(dev)
                 weight = 1.0 / (normal_stats[layer_name]['mad'] + 1e-8)
                 total_weight += weight
                 if weighted_sum is None: weighted_sum = dev * weight
                 else: weighted_sum += dev * weight
             score_spatial = weighted_sum / total_weight
             
-    score_maps = F.interpolate(score_spatial.unsqueeze(1).float(), size=(img_size, img_size), mode='bilinear', align_corners=False).squeeze(1).cpu().numpy()
+    final_interpolator = HardwareFriendlyInterpolator(score_spatial.shape[1:], (img_size, img_size)).to(device)
+    final_interpolator.eval()
+    with torch.no_grad():
+        score_maps = final_interpolator(score_spatial).cpu().numpy()
     img_scores = [float(np.max(sm)) for sm in score_maps]
     return score_maps, img_scores
 

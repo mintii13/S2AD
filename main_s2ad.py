@@ -243,8 +243,8 @@ class HardwareFriendlyZScoreAbs(nn.Module):
         
         # 1. 1-to-1 Synaptic Connections for Z-Score (Neuromorphic mapping)
         # Instead of shared Conv2d, each spatial neuron has its own weight/bias.
-        self.w = nn.Parameter(1.0 / (std + 1e-8)) # (C, H, W)
-        self.b = nn.Parameter(-mean / (std + 1e-8)) # (C, H, W)
+        self.register_buffer('w', 1.0 / (std + 1e-8)) # (C, H, W)
+        self.register_buffer('b', -mean / (std + 1e-8)) # (C, H, W)
 
     def forward(self, x):
         # 1. Spatially unshared Z-score
@@ -286,6 +286,15 @@ class HardwareFriendlyInterpolator(nn.Module):
         y_flat = self.linear(x_flat)
         return y_flat.view(B, self.out_shape[0], self.out_shape[1])
 
+_interpolators_cache = {}
+def get_interpolator(in_shape, out_shape, device):
+    key = (in_shape, out_shape)
+    if key not in _interpolators_cache:
+        interpolator = HardwareFriendlyInterpolator(in_shape, out_shape).to(device)
+        interpolator.eval()
+        _interpolators_cache[key] = interpolator
+    return _interpolators_cache[key]
+
 def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
@@ -310,8 +319,7 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
             combined = torch.zeros_like(deviations[target_name])
             for layer_name, dev in deviations.items():
                 if dev.shape[1:] != target_res:
-                    interpolator = HardwareFriendlyInterpolator(dev.shape[1:], target_res).to(device)
-                    interpolator.eval()
+                    interpolator = get_interpolator(dev.shape[1:], target_res, device)
                     with torch.no_grad():
                         dev = interpolator(dev)
                 combined += dev
@@ -320,8 +328,7 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
             weighted_sum, total_weight = None, 0.0
             for layer_name, dev in deviations.items():
                 if dev.shape[1:] != target_res:
-                    interpolator = HardwareFriendlyInterpolator(dev.shape[1:], target_res).to(device)
-                    interpolator.eval()
+                    interpolator = get_interpolator(dev.shape[1:], target_res, device)
                     with torch.no_grad():
                         dev = interpolator(dev)
                 weight = 1.0 / (normal_stats[layer_name]['mad'] + 1e-8)
@@ -330,8 +337,7 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
                 else: weighted_sum += dev * weight
             score_spatial = weighted_sum / total_weight
             
-    final_interpolator = HardwareFriendlyInterpolator(score_spatial.shape[1:], (img_size, img_size)).to(device)
-    final_interpolator.eval()
+    final_interpolator = get_interpolator(score_spatial.shape[1:], (img_size, img_size), device)
     with torch.no_grad():
         score_maps = final_interpolator(score_spatial).cpu().numpy()
     img_scores = [float(np.max(sm)) for sm in score_maps]

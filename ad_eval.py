@@ -89,7 +89,7 @@ def compute_pro_metric(gt_masks, anomaly_maps, fpr_limit=0.3):
 
 import time
 
-def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
+def evaluate_ad(net, test_loader, device, epoch, args, dataset_name, cumulative_train_time=0.0, train_loss=0.0, test_loss=0.0):
     start_test_time = time.time()
     net.eval()
     img_scores, img_labels = [], []
@@ -180,10 +180,10 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name):
     
     with open(out_path, 'a') as f:
         if is_new_file:
-            f.write(f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'TestTime':>8} | {'FPS':>8}\n")
-            f.write('-' * 125 + '\n')
+            f.write(f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'TrainLoss':>9} | {'TestLoss':>9} | {'Train(s)':>8} | {'Test(s)':>8} | {'FPS':>8}\n")
+            f.write('-' * 155 + '\n')
             
-        row = f'{epoch:8d} | {img_auc:8.4f} | {img_ap:8.4f} | {img_f1:8.4f} | {pix_auc:8.4f} | {pix_ap:8.4f} | {pix_f1:8.4f} | {pro_score:8.4f} | {mAD_score:8.4f} | {test_time:8.2f} | {fps:8.2f}'
+        row = f'{epoch:8d} | {img_auc:8.4f} | {img_ap:8.4f} | {img_f1:8.4f} | {pix_auc:8.4f} | {pix_ap:8.4f} | {pix_f1:8.4f} | {pro_score:8.4f} | {mAD_score:8.4f} | {train_loss:9.4f} | {test_loss:9.4f} | {cumulative_train_time:8.1f} | {test_time:8.2f} | {fps:8.2f}'
         f.write(row + '\n')
         print(row)
         

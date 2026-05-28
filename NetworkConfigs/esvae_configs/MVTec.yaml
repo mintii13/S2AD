@@ -4,7 +4,7 @@ Network:
   data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
   dataset: mvtec
   distance_lambda: 0.0125
-  epochs: 300
+  epochs: 200
   in_channels: 3
   input_size: 256
   k: 20

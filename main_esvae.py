@@ -459,8 +459,12 @@ if __name__ == '__main__':
         if isinstance(checkpoint, dict) and 'net' in checkpoint:
             net.load_state_dict(checkpoint['net'])
             start_epoch = checkpoint.get('epoch', -1) + 1
+            cumulative_train_time = checkpoint.get('cumulative_train_time', 0.0)
         else:
             net.load_state_dict(checkpoint)
+            cumulative_train_time = 0.0
+    else:
+        cumulative_train_time = 0.0
 
     params = list(net.named_parameters())
     param_group = [
@@ -486,13 +490,18 @@ if __name__ == '__main__':
         if network_config['scheduled']:
             net.update_p(e, glv.network_config['epochs'])
             logging.info("update p")
+        import time
+        start_train = time.time()
         train_loss = train(net, train_loader, optimizer, e)
+        cumulative_train_time += time.time() - start_train
+        
         test_loss = test(net, test_loader, e)
 
         checkpoint_dict = {
             'net': net.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'epoch': e
+            'epoch': e,
+            'cumulative_train_time': cumulative_train_time
         }
         torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
         if test_loss < best_loss:
@@ -523,7 +532,7 @@ if __name__ == '__main__':
         if (e + 1) % ad_eval_epochs == 0 and dataset_name in ['mvtec', 'visa']:
             try:
                 from ad_eval import evaluate_ad
-                evaluate_ad(net, test_loader, init_device, e, args, dataset_name)
+                evaluate_ad(net, test_loader, init_device, e, args, dataset_name, cumulative_train_time, train_loss, test_loss)
             except Exception as ex:
                 import traceback
                 print(f"AD Eval error: {ex}")

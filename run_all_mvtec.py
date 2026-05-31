@@ -9,7 +9,7 @@ CLASSES = [
     'tile', 'toothbrush', 'transistor', 'wood', 'zipper'
 ]
 
-TIMESTEPS = [16, 8, 4]
+TIMESTEPS = [16]
 CONFIG_PATH = 'NetworkConfigs/esvae_configs/MVTec.yaml'
 RESULTS_DIR = './results_esvae_d1024'
 
@@ -20,9 +20,9 @@ def update_yaml_nsteps(path, n_steps):
     with open(path, 'w') as f:
         yaml.dump(data, f, default_flow_style=False)
 
-def get_last_metrics(dataset_name, category, n_steps):
+def get_last_metrics(dataset_name, category, n_steps, results_dir):
     # Example: mvtec_bottle_T16_ad_eval_results.txt
-    file_path = os.path.join(RESULTS_DIR, f"{dataset_name}_{category}_T{n_steps}_ad_eval_results.txt")
+    file_path = os.path.join(results_dir, f"{dataset_name}_{category}_T{n_steps}_ad_eval_results.txt")
     if not os.path.exists(file_path):
         return None
     try:
@@ -70,13 +70,13 @@ def get_last_metrics(dataset_name, category, n_steps):
 
 import glob
 
-def get_checkpoint_path(cls, config_path, t):
+def get_checkpoint_path(cls, config_path, t, model_name, results_dir):
     # We include T{t} in the glob pattern to make sure we don't accidentally resume T=8 from a T=16 checkpoint
-    pattern = os.path.join(RESULTS_DIR, 'checkpoint', 'mvtec', f'mvtec_{cls}_esvae_T{t}_*', 'checkpoint.pth')
+    pattern = os.path.join(results_dir, 'checkpoint', 'mvtec', f'mvtec_{cls}_{model_name}_T{t}_*', 'checkpoint.pth')
     matches = glob.glob(pattern)
     if not matches:
         # Fallback to vanilla prefix if needed
-        pattern = os.path.join(RESULTS_DIR, 'checkpoint', 'mvtec', f'vanilla_mvtec_esvae_*', 'checkpoint.pth')
+        pattern = os.path.join(results_dir, 'checkpoint', 'mvtec', f'vanilla_mvtec_{model_name}_*', 'checkpoint.pth')
         matches = glob.glob(pattern)
         
     if matches:
@@ -88,38 +88,48 @@ def get_checkpoint_path(cls, config_path, t):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-resume', action='store_true', help='Auto find and resume from checkpoint')
+    parser.add_argument('-model', type=str, default='esvae', choices=['esvae', 'fsvae'], help='Model to train (esvae or fsvae)')
     args = parser.parse_args()
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    if args.model == 'esvae':
+        config_path = 'NetworkConfigs/esvae_configs/MVTec.yaml'
+        results_dir = './results_esvae_d1024'
+        main_script = 'main_esvae.py'
+    else:
+        config_path = 'NetworkConfigs/fsvae_configs/MVTec.yaml'
+        results_dir = './results_fsvae_d1024'
+        main_script = 'main_fsvae.py'
+
+    os.makedirs(results_dir, exist_ok=True)
     
     import time
     
     for t in TIMESTEPS:
-        summary_file = os.path.join(RESULTS_DIR, f'mvtec_overall_summary_T{t}.txt')
+        summary_file = os.path.join(results_dir, f'mvtec_overall_summary_T{t}.txt')
         with open(summary_file, 'w') as f:
             f.write(f"=== MVTec Overall Summary [Timestep {t}] ===\n")
             f.write(f"{'Class':<15} | {'Img AUC':>7} | {'Img AP':>7} | {'Img F1':>7} | {'Pix AUC':>7} | {'Pix AP':>7} | {'Pix F1':>7} | {'PRO':>7} | {'mAD':>7} | {'TrainLoss':>9} | {'TestLoss':>9} | {'Train(s)':>8} | {'Test(s)':>7} | {'FPS':>7}\n")
             f.write("-" * 145 + "\n")
             
         print(f"\n{'='*50}")
-        print(f" STARTING ALL CLASSES WITH TIMESTEP T={t}")
+        print(f" STARTING ALL CLASSES WITH TIMESTEP T={t} MODEL={args.model.upper()}")
         print(f"{'='*50}")
-        update_yaml_nsteps(CONFIG_PATH, t)
+        update_yaml_nsteps(config_path, t)
         
         all_metrics = {}
         
         for cls in CLASSES:
             print(f"\n---> Training class: [{cls}] with T={t}")
             cmd = [
-                "python", "main_esvae.py",
+                "python", main_script,
                 "-name", "exp_name",
                 "-category", cls,
-                "-config", CONFIG_PATH,
-                "-project_save_path", RESULTS_DIR
+                "-config", config_path,
+                "-project_save_path", results_dir
             ]
             
             if args.resume:
-                ckpt_path = get_checkpoint_path(cls, CONFIG_PATH, t)
+                ckpt_path = get_checkpoint_path(cls, config_path, t, args.model, results_dir)
                 if os.path.exists(ckpt_path):
                     print(f"   [RESUME] Found checkpoint: {ckpt_path}")
                     cmd.extend(["-checkpoint", ckpt_path])
@@ -128,7 +138,7 @@ def main():
             subprocess.run(cmd)
             train_time = time.time() - start_train
             
-            metrics = get_last_metrics('mvtec', cls, t)
+            metrics = get_last_metrics('mvtec', cls, t, results_dir)
             if metrics is not None:
                 # We use cumulative train_time parsed from the txt if available, otherwise fallback
                 train_time_to_report = metrics['train_time'] if metrics.get('train_time', 0) > 0 else train_time

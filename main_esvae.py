@@ -486,7 +486,9 @@ if __name__ == '__main__':
     best_fid = 1e8
     for e in range(start_epoch, glv.network_config['epochs']):
 
-        write_weight_hist(net, e)
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
+        if (e + 1) % ad_eval_epochs == 0:
+            write_weight_hist(net, e)
         if network_config['scheduled']:
             net.update_p(e, glv.network_config['epochs'])
             logging.info("update p")
@@ -495,8 +497,6 @@ if __name__ == '__main__':
         train_loss = train(net, train_loader, optimizer, e)
         cumulative_train_time += time.time() - start_train
         
-        test_loss = test(net, test_loader, e)
-
         checkpoint_dict = {
             'net': net.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -504,39 +504,43 @@ if __name__ == '__main__':
             'cumulative_train_time': cumulative_train_time
         }
         torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
-        if test_loss < best_loss:
-            best_loss = test_loss
-            torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
-
-        sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
-        if dataset_name not in ['mvtec', 'visa']:
-            in_score = calc_inception_score(net, e, batch_size=glv.network_config['sample_batch_size'])
-            autoencoder_dist = calc_autoencoder_frechet_distance(net, e)
-            fid = calc_clean_fid(net, e)
-
-            if in_score > best_inception_score:
-                best_inception_score = in_score
-                torch.save({'net': net.state_dict(), 'epoch': e},
-                           f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_inception_score.pth')
-
-            if autoencoder_dist < best_autoencoder_dist:
-                best_autoencoder_dist = autoencoder_dist
-                torch.save({'net': net.state_dict(), 'epoch': e},
-                           f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_autoencoder_dist.pth')
-
-            if fid < best_fid:
-                best_fid = fid
-                torch.save({'net': net.state_dict(), 'epoch': e}, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_fid.pth')
 
         ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
-        if (e + 1) % ad_eval_epochs == 0 and dataset_name in ['mvtec', 'visa']:
-            try:
-                from ad_eval import evaluate_ad
-                evaluate_ad(net, test_loader, init_device, e, args, dataset_name, cumulative_train_time, train_loss, test_loss)
-            except Exception as ex:
-                import traceback
-                print(f"AD Eval error: {ex}")
-                traceback.print_exc()
+        if (e + 1) % ad_eval_epochs == 0:
+            test_loss = test(net, test_loader, e)
+            
+            if test_loss < best_loss:
+                best_loss = test_loss
+                torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
+
+            sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
+            if dataset_name not in ['mvtec', 'visa']:
+                in_score = calc_inception_score(net, e, batch_size=glv.network_config['sample_batch_size'])
+                autoencoder_dist = calc_autoencoder_frechet_distance(net, e)
+                fid = calc_clean_fid(net, e)
+
+                if in_score > best_inception_score:
+                    best_inception_score = in_score
+                    torch.save({'net': net.state_dict(), 'epoch': e},
+                               f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_inception_score.pth')
+
+                if autoencoder_dist < best_autoencoder_dist:
+                    best_autoencoder_dist = autoencoder_dist
+                    torch.save({'net': net.state_dict(), 'epoch': e},
+                               f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_autoencoder_dist.pth')
+
+                if fid < best_fid:
+                    best_fid = fid
+                    torch.save({'net': net.state_dict(), 'epoch': e}, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best_fid.pth')
+
+            if dataset_name in ['mvtec', 'visa']:
+                try:
+                    from ad_eval import evaluate_ad
+                    evaluate_ad(net, test_loader, init_device, e, args, dataset_name, cumulative_train_time, train_loss, test_loss)
+                except Exception as ex:
+                    import traceback
+                    print(f"AD Eval error: {ex}")
+                    traceback.print_exc()
 
     writer.close()
 

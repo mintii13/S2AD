@@ -363,8 +363,12 @@ if __name__ == '__main__':
         if isinstance(checkpoint, dict) and 'net' in checkpoint:
             net.load_state_dict(checkpoint['net'])
             start_epoch = checkpoint.get('epoch', -1) + 1
+            cumulative_train_time = checkpoint.get('cumulative_train_time', 0.0)
         else:
             net.load_state_dict(checkpoint)
+            cumulative_train_time = 0.0
+    else:
+        cumulative_train_time = 0.0
     optimizer = torch.optim.AdamW(net.parameters(),
                                   lr=glv.network_config['lr'],
                                   betas=(0.9, 0.999),
@@ -376,34 +380,44 @@ if __name__ == '__main__':
     best_loss = 1e8
     for e in range(start_epoch, glv.network_config['epochs']):
 
-        write_weight_hist(net, e)
+        ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
+        if (e + 1) % ad_eval_epochs == 0:
+            write_weight_hist(net, e)
         if network_config['scheduled']:
             net.update_p(e, glv.network_config['epochs'])
             logging.info("update p")
+            
+        import time
+        start_train = time.time()
         train_loss = train(net, train_loader, optimizer, e)
-        test_loss = test(net, test_loader, e)
-
+        cumulative_train_time += time.time() - start_train
+        
         checkpoint_dict = {
             'net': net.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'epoch': e
+            'epoch': e,
+            'cumulative_train_time': cumulative_train_time
         }
         torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/checkpoint.pth')
-        if test_loss < best_loss:
-            best_loss = test_loss
-            torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
-
-        sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
-        # calc_inception_score(net, e, batch_size=glv.network_config['sample_batch_size'])
-        # calc_autoencoder_frechet_distance(net, e)
-        # calc_clean_fid(net, e)
-
+        
         ad_eval_epochs = glv.network_config.get('ad_eval_epochs', 50)
-        if (e + 1) % ad_eval_epochs == 0 and dataset_name in ['mvtec', 'visa']:
-            try:
-                from ad_eval import evaluate_ad
-                evaluate_ad(net, test_loader, init_device, e, args, dataset_name)
-            except Exception as ex:
-                print(f"AD Eval error: {ex}")
+        if (e + 1) % ad_eval_epochs == 0:
+            test_loss = test(net, test_loader, e)
+            
+            if test_loss < best_loss:
+                best_loss = test_loss
+                torch.save(checkpoint_dict, f'{args.project_save_path}/checkpoint/{dataset_name}/{args.name}/best.pth')
+
+            sample(net, e, batch_size=glv.network_config.get('sample_batch_size', 16))
+            # calc_inception_score(net, e, batch_size=glv.network_config['sample_batch_size'])
+            # calc_autoencoder_frechet_distance(net, e)
+            # calc_clean_fid(net, e)
+
+            if dataset_name in ['mvtec', 'visa']:
+                try:
+                    from ad_eval import evaluate_ad
+                    evaluate_ad(net, test_loader, init_device, e, args, dataset_name, cumulative_train_time, train_loss, test_loss)
+                except Exception as ex:
+                    print(f"AD Eval error: {ex}")
 
     writer.close()

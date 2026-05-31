@@ -1,16 +1,17 @@
 Network:
-  epochs: 150
-  batch_size: 16
-  sample_batch_size: 16
-  n_steps: 4
-  dataset: "mvtec"
+  ad_eval_epochs: 50
+  batch_size: 8
+  data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
+  dataset: mvtec
+  epochs: 200
   in_channels: 3
-  data_path: "/home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec"
-  lr: 0.001
-  n_class: 1
-  latent_dim: 128
   input_size: 256
-  model: "FSVAE"
   k: 20
+  latent_dim: 1024
+  loss_func: mmd
+  lr: 0.001
+  model: FSVAE
+  n_class: 1
+  n_steps: 16
+  sample_batch_size: 0
   scheduled: true
-  loss_func: 'mmd'

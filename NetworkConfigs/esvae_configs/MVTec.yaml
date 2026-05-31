@@ -14,7 +14,7 @@ Network:
   mmd_type: linear
   model: ESVAE
   n_class: 1
-  n_steps: 16
+  n_steps: 8
   sample_batch_size: 0
   sample_layer_lr_times: 10
   scheduled: true

@@ -6,3 +6,11 @@ matplotlib
 scipy
 clean-fid
 pandas
+spikingjelly
+setproctitle
+scikit-learn
+opencv-python
+seaborn
+torch
+torchvision
+numpy

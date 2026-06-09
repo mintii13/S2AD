@@ -10,7 +10,7 @@ CLASSES = [
     'macaroni1', 'macaroni2', 'pcb1', 'pcb2', 'pcb3', 'pcb4', 'pipe_fryum'
 ]
 
-TIMESTEPS = [16, 8]
+TIMESTEPS = [16]
 CONFIG_PATH = 'NetworkConfigs/esvae_configs/VisA.yaml'
 RESULTS_DIR = './results_esvae_d1024_visa'
 
@@ -89,17 +89,21 @@ def get_checkpoint_path(cls, config_path, t, model_name, results_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-resume', action='store_true', help='Auto find and resume from checkpoint')
-    parser.add_argument('-model', type=str, default='esvae', choices=['esvae', 'fsvae'], help='Model to train (esvae or fsvae)')
+    parser.add_argument('-model', type=str, default='esvae', choices=['esvae', 'fsvae', 's2ad'], help='Model to train/eval (esvae, fsvae, s2ad)')
     args = parser.parse_args()
 
     if args.model == 'esvae':
         config_path = 'NetworkConfigs/esvae_configs/VisA.yaml'
         results_dir = './results_esvae_d1024_visa'
         main_script = 'main_esvae.py'
-    else:
+    elif args.model == 'fsvae':
         config_path = 'NetworkConfigs/fsvae_configs/VisA.yaml'
         results_dir = './results_fsvae_d1024_visa'
         main_script = 'main_fsvae.py'
+    else:
+        config_path = 'NetworkConfigs/s2ad_configs/VisA.yaml'
+        results_dir = './results_s2ad_0.4_visa'
+        main_script = 'main_s2ad.py'
 
     os.makedirs(results_dir, exist_ok=True)
     

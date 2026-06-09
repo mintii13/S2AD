@@ -295,6 +295,16 @@ def get_interpolator(in_shape, out_shape, device):
         _interpolators_cache[key] = interpolator
     return _interpolators_cache[key]
 
+_zscore_cache = {}
+def get_zscore_layer(layer_name, normal_stats, device):
+    if layer_name not in _zscore_cache:
+        mean = normal_stats[layer_name]['mean'].to(device)
+        std = normal_stats[layer_name]['std'].to(device)
+        hw_layer = HardwareFriendlyZScoreAbs(mean, std).to(device)
+        hw_layer.eval()
+        _zscore_cache[layer_name] = hw_layer
+    return _zscore_cache[layer_name]
+
 def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
@@ -302,11 +312,7 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
     
     deviations = {}
     for layer_name, rate in rates.items():
-        mean = normal_stats[layer_name]['mean'].to(device)
-        std = normal_stats[layer_name]['std'].to(device)
-        
-        hw_layer = HardwareFriendlyZScoreAbs(mean, std).to(device)
-        hw_layer.eval()
+        hw_layer = get_zscore_layer(layer_name, normal_stats, device)
         with torch.no_grad():
             deviations[layer_name] = hw_layer(rate)
     
@@ -345,6 +351,8 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
 
 def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name):
     import cv2
+    import time
+    start_test_time = time.time()
     img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps = [], [], [], [], [], []
     
     for imgs, lbls, gt_paths in test_loader:
@@ -384,6 +392,8 @@ def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, 
                 pix_labels.extend(gt_bin.flatten())
                 gt_masks.append(gt_bin)
                 anomaly_maps.append(score_map)
+                
+    test_time = time.time() - start_test_time
             
     img_auc = roc_auc_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
     img_ap = average_precision_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
@@ -397,7 +407,7 @@ def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, 
         pix_f1 = np.max(2 * (pprec * prec_rec) / (pprec + prec_rec + 1e-8)) if len(pprec) > 0 else 0.0
     else: pix_f1 = 0.0
     pro_score = compute_pro_metric(gt_masks, anomaly_maps) if gt_masks else 0.0
-    return {'img_auc': img_auc, 'img_ap': img_ap, 'img_f1': img_f1, 'pix_auc': pix_auc, 'pix_ap': pix_ap, 'pix_f1': pix_f1, 'pro': pro_score}, img_scores, img_labels
+    return {'img_auc': img_auc, 'img_ap': img_ap, 'img_f1': img_f1, 'pix_auc': pix_auc, 'pix_ap': pix_ap, 'pix_f1': pix_f1, 'pro': pro_score, 'test_time': test_time}, img_scores, img_labels
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 5 - Main
@@ -495,9 +505,8 @@ def main():
             
         maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", category_name, f"T{T}") if save_maps else None
         
-        start_test = time.time()
         metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name)
-        test_time = time.time() - start_test
+        test_time = metrics['test_time']
         fps = len(test_loader.dataset) / test_time if test_time > 0 else 0
         
         mAD_score = (metrics["img_auc"] + metrics["img_ap"] + metrics["img_f1"] + metrics["pix_auc"] + metrics["pix_ap"] + metrics["pix_f1"] + metrics["pro"]) / 7.0

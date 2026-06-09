@@ -418,11 +418,14 @@ def main():
     g = torch.Generator(); g.manual_seed(42)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('-name', type=str, required=True, help='Category name')
+    parser.add_argument('-name', type=str, required=True, help='Category name or Exp name')
+    parser.add_argument('-category', type=str, default='', help='Category name (for compatibility with run_all scripts)')
     parser.add_argument('-config', type=str, required=True, help='Path to yaml config')
     parser.add_argument('-project_save_path', type=str, default='./results_s2ad')
     args = parser.parse_args()
     
+    category_name = args.category if args.category else args.name
+
     config = parse(args.config)['Network']
     config['batch_size'] = config.get('batch_size', 16)
     config['input_size'] = config.get('input_size', 256)
@@ -444,7 +447,7 @@ def main():
     
     print('=' * 60)
     print(f'S2AD - Statistical SNN-based Anomaly Detection')
-    print(f'  Category: {args.name} ({dataset_name})')
+    print(f'  Category: {category_name} ({dataset_name})')
     print(f'  Backbone: {backbone} | Layers: {layers}')
     print(f'  Timesteps: {timesteps}')
     print('=' * 60)
@@ -454,9 +457,9 @@ def main():
     
     print('\n[2/4] Loading normal dataset...')
     if dataset_name == 'mvtec':
-        train_loader, test_loader = load_mvtec(net_config['data_path'], args.name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
+        train_loader, test_loader = load_mvtec(net_config['data_path'], category_name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
     else:
-        train_loader, test_loader = load_visa(net_config['data_path'], args.name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
+        train_loader, test_loader = load_visa(net_config['data_path'], category_name, shuffle_train=False, drop_last_train=False, normalize='imagenet')
         
     full_normal_ds = train_loader.dataset
     if 0 < calib_samples < len(full_normal_ds):
@@ -490,10 +493,10 @@ def main():
                 'mad': stats['mad']
             }
             
-        maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", args.name, f"T{T}") if save_maps else None
+        maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", category_name, f"T{T}") if save_maps else None
         
         start_test = time.time()
-        metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, args.name)
+        metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name)
         test_time = time.time() - start_test
         fps = len(test_loader.dataset) / test_time if test_time > 0 else 0
         
@@ -505,9 +508,17 @@ def main():
         results[T] = metrics
         print(f'{T:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f} | {metrics["train_time"]:8.1f} | {metrics["test_time"]:7.1f} | {metrics["fps"]:7.1f}')
         
-    out_path = os.path.join(args.project_save_path, f'{args.name}_s2ad_results.txt')
+        ad_eval_out_path = os.path.join(args.project_save_path, f'{dataset_name}_{category_name}_T{T}_ad_eval_results.txt')
+        is_new_file = not os.path.exists(ad_eval_out_path)
+        with open(ad_eval_out_path, 'a') as fa:
+            if is_new_file:
+                fa.write(f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'TrainLoss':>9} | {'TestLoss':>9} | {'Train(s)':>8} | {'Test(s)':>8} | {'FPS':>8}\n")
+                fa.write('-' * 155 + '\n')
+            fa.write(f'{199:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f} | {0.0:9.4f} | {0.0:9.4f} | {train_time:8.1f} | {test_time:8.2f} | {fps:8.2f}\n')
+        
+    out_path = os.path.join(args.project_save_path, f'{category_name}_s2ad_results.txt')
     with open(out_path, 'w') as f:
-        f.write(f"S2AD Results - {args.name}\n")
+        f.write(f"S2AD Results - {category_name}\n")
         f.write(f"{'=' * 50}\n")
         f.write(f"Backbone: {backbone} | Layers: {layers}\n")
         f.write(f"Combine Method: {combine_method}\n")

@@ -12,6 +12,6 @@ Network:
   lr: 0.001
   model: FSVAE
   n_class: 1
-  n_steps: 16
+  n_steps: 8
   sample_batch_size: 0
   scheduled: true

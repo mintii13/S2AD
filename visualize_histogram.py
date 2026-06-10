@@ -168,6 +168,15 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
     for l in ['layer1', 'layer2', 'layer3']:
         stats[l]['mad'] = sum_abs_dev[l] / count
 
+    print(f"\nTimestep T={T}:")
+    for l in ['layer1', 'layer2', 'layer3']:
+        mean_val = stats[l]['mean'].mean().item()
+        max_val = stats[l]['max_rate']
+        std_val = stats[l]['std'].mean().item()
+        mad_val = stats[l]['mad']
+        print(f"  {l}: mean={mean_val:.6f}, max={max_val:.6f}, std={std_val:.6f}, mAD={mad_val:.6f}")
+    print()
+
     # GET ALL TEST IMAGES (excluding 'good' folder if desired, but we'll run all)
     test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d))]
     
@@ -247,31 +256,62 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
             # Bảng 5x7 với Title to
             row_titles = ['Layer 1 (Shallow)', 'Layer 2 (Mid)', 'Layer 3 (Deep)', 'Average Combine', 'MAD Weighting']
             col_keys = ['1_normal', '2_test', '3_abs_diff', '4_zscore', '5_blended', '6_input']
-            col_titles = ['Normal Firing Rate', 'Test Firing Rate', 'Absolute Deviation Map', 'Z-Score Map', 'Blended Anomaly Map', 'Test Image', 'Ground Truth']
+            col_titles = ['Normal Firing Rate', 'Test Firing Rate', 'Abs Deviation Map', 'Z-Score Map', 'Blended Anomaly Map', 'Test Image', 'Ground Truth']
 
-            fig, axes = plt.subplots(5, 7, figsize=(40, 28)) 
-            fig.suptitle(f"{category} | {t_folder}/{filename} ({backbone.upper()}) | Max Anomaly Score = {img_score:.4f}", fontsize=36, fontweight='bold', y=0.98, color='navy')
+            import matplotlib.cm as cm
+            from matplotlib.ticker import FuncFormatter
+            
+            # Format số đúng 4 chữ số (ví dụ: 0.123 hoặc 12.34)
+            def custom_tick_format(val, pos):
+                if val == 0: return "0.000"
+                abs_v = abs(val)
+                if abs_v >= 100: return f"{val:.1f}"
+                elif abs_v >= 10: return f"{val:.2f}"
+                else: return f"{val:.3f}"
+            
+            # Dùng 8 cột thay vì 7 cột. Chèn 1 cột rỗng (dummy) ở vị trí số 5 (index 4) để chủ động tạo khoảng cách giữa Z-score và Blended.
+            # Cột 1-4 dùng 1.3 để cách đều nhau. Cột rỗng dùng 0.2 để giãn Z-score và Blended.
+            # 3 cột cuối (Blended, Test, GT) dùng tỷ lệ 1.0 để dính chặt tuyệt đối.
+            fig, axes = plt.subplots(5, 8, figsize=(47, 28), gridspec_kw={'width_ratios': [1.2, 1.2, 1.2, 1.2, 0.2, 1.0, 1.0, 1.0]}) 
+            fig.suptitle(f"{category} | {t_folder}/{filename} ({backbone.upper()}) | Max Anomaly Score = {img_score:.4f}", fontsize=50, fontweight='bold', y=0.98, color='navy')
 
             for r, r_key in enumerate(row_keys):
                 for c, c_key in enumerate(col_keys):
-                    ax = axes[r, c]
+                    # Bỏ qua cột rỗng ở giữa (index 4)
+                    ax_idx = c if c < 4 else c + 1
+                    ax = axes[r, ax_idx]
                     if c_key in ['5_blended', '6_input']:
                         ax.imshow(maps[r_key][c_key]) 
                     else:
                         im = ax.imshow(maps[r_key][c_key], cmap='jet')
                         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        cb.ax.tick_params(labelsize=14)
                         
-                    if r == 0: ax.set_title(col_titles[c], fontsize=22, fontweight='bold', pad=15)
-                    if c == 0: ax.set_ylabel(row_titles[r], fontsize=22, fontweight='bold', labelpad=15)
+                        # Lấy đúng 4 mốc, xích vào giữa 5% để chữ không thò ra ngoài viền trên/dưới
+                        vmin, vmax = im.get_clim()
+                        if vmax > vmin:
+                            margin = (vmax - vmin) * 0.05
+                            cb.set_ticks(np.linspace(vmin + margin, vmax - margin, 4))
+                        else:
+                            cb.set_ticks([vmin])
+                            
+                        # Format 4 chữ số
+                        cb.ax.yaxis.set_major_formatter(FuncFormatter(custom_tick_format))
+                        cb.ax.tick_params(labelsize=20)
+                        
+                    if r == 0: ax.set_title(col_titles[c], fontsize=30, fontweight='bold', pad=25)
+                    if c == 0: ax.set_ylabel(row_titles[r], fontsize=30, fontweight='bold', labelpad=25)
                     ax.set_xticks([]); ax.set_yticks([])
                     
-                ax_gt = axes[r, 6]
+                # Tắt cột rỗng
+                axes[r, 4].axis('off')
+                    
+                ax_gt = axes[r, 7]
                 ax_gt.imshow(mask_bin, cmap='gray')
-                if r == 0: ax_gt.set_title(col_titles[6], fontsize=22, fontweight='bold', pad=15)
+                if r == 0: ax_gt.set_title(col_titles[6], fontsize=30, fontweight='bold', pad=25)
                 ax_gt.set_xticks([]); ax_gt.set_yticks([])
 
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            # Thay thế tight_layout bằng subplots_adjust với wspace=0.0 để 3 ảnh cuối dính chặt hoàn toàn
+            plt.subplots_adjust(wspace=0.0, hspace=0.1, left=0.02, right=0.98, top=0.92, bottom=0.02)
             
             save_name = f"{t_folder}_{filename}"
             save_path = os.path.join(out_dir, save_name)

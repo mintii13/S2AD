@@ -10,7 +10,7 @@ CLASSES = [
     'macaroni1', 'macaroni2', 'pcb1', 'pcb2', 'pcb3', 'pcb4', 'pipe_fryum'
 ]
 
-TIMESTEPS = [16]
+TIMESTEPS = [8]
 CONFIG_PATH = 'NetworkConfigs/esvae_configs/VisA.yaml'
 RESULTS_DIR = './results_esvae_d1024_visa'
 

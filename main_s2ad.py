@@ -236,15 +236,16 @@ def _get_membrane_score(snn_encoder):
     return None
 
 class HardwareFriendlyZScoreAbs(nn.Module):
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, use_zscore=True):
         super().__init__()
-        # mean, std have shape (C, H, W)
         self.C, self.H, self.W = mean.shape
         
-        # 1. 1-to-1 Synaptic Connections for Z-Score (Neuromorphic mapping)
-        # Instead of shared Conv2d, each spatial neuron has its own weight/bias.
-        self.register_buffer('w', 1.0 / (std + 1e-8)) # (C, H, W)
-        self.register_buffer('b', -mean / (std + 1e-8)) # (C, H, W)
+        if use_zscore:
+            self.register_buffer('w', 1.0 / (std + 1e-8)) # (C, H, W)
+        else:
+            self.register_buffer('w', torch.ones_like(std))
+            
+        self.register_buffer('b', -mean * self.w) # Adjust b since z = (x - mean) * w = x * w - mean * w
 
     def forward(self, x):
         # 1. Spatially unshared Z-score
@@ -296,23 +297,24 @@ def get_interpolator(in_shape, out_shape, device):
     return _interpolators_cache[key]
 
 _zscore_cache = {}
-def get_zscore_layer(layer_name, normal_stats, device):
-    if layer_name not in _zscore_cache:
+def get_zscore_layer(layer_name, normal_stats, device, use_zscore):
+    cache_key = f"{layer_name}_{use_zscore}"
+    if cache_key not in _zscore_cache:
         mean = normal_stats[layer_name]['mean'].to(device)
         std = normal_stats[layer_name]['std'].to(device)
-        hw_layer = HardwareFriendlyZScoreAbs(mean, std).to(device)
+        hw_layer = HardwareFriendlyZScoreAbs(mean, std, use_zscore=use_zscore).to(device)
         hw_layer.eval()
-        _zscore_cache[layer_name] = hw_layer
-    return _zscore_cache[layer_name]
+        _zscore_cache[cache_key] = hw_layer
+    return _zscore_cache[cache_key]
 
-def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple'):
+def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple', use_zscore=True):
     snn_encoder.eval()
     img_tensor = img_tensor.to(device)
     rates = get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers)
     
     deviations = {}
     for layer_name, rate in rates.items():
-        hw_layer = get_zscore_layer(layer_name, normal_stats, device)
+        hw_layer = get_zscore_layer(layer_name, normal_stats, device, use_zscore)
         with torch.no_grad():
             deviations[layer_name] = hw_layer(rate)
     
@@ -349,14 +351,14 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
     img_scores = [float(np.max(sm)) for sm in score_maps]
     return score_maps, img_scores
 
-def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name):
+def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name, use_zscore=True):
     import cv2
     import time
     start_test_time = time.time()
     img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps = [], [], [], [], [], []
     
     for imgs, lbls, gt_paths in test_loader:
-        score_maps, batch_img_scores = score_image_batch(snn_encoder, imgs, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method)
+        score_maps, batch_img_scores = score_image_batch(snn_encoder, imgs, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, use_zscore)
         
         for b in range(imgs.size(0)):
             score_map = score_maps[b]
@@ -453,6 +455,7 @@ def main():
     calib_samples = net_config.get('calib_samples', 500)
     combine_method = net_config.get('combine_method', 'mad_weighted')
     save_maps = net_config.get('save_anomaly_maps', False)
+    use_zscore = net_config.get('use_zscore', True)
     img_size = net_config['input_size']
     
     print('=' * 60)
@@ -503,9 +506,9 @@ def main():
                 'mad': stats['mad']
             }
             
-        maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}", category_name, f"T{T}") if save_maps else None
+        maps_dir = os.path.join(args.project_save_path, 'anomaly_maps', f"{backbone}_{combine_method}{layers}_zscore{use_zscore}", category_name, f"T{T}") if save_maps else None
         
-        metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name)
+        metrics, _, _ = evaluate(snn_encoder, test_loader, normal_stats, device, T, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name, use_zscore)
         test_time = metrics['test_time']
         fps = len(test_loader.dataset) / test_time if test_time > 0 else 0
         

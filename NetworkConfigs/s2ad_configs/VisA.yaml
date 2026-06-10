@@ -1,13 +1,16 @@
 Network:
-  dataset: "visa"
-  data_path: "/home/minhtringuyen/ANN2SNN/dataloader/datasets/visa"
-  input_size: 256
+  backbone: vgg16
   batch_size: 16
-  backbone: "vgg16"
-  layers: "layer123"
-  snn_mode: "0.4"
-  timesteps: [16]
-  use_membrane: False
   calib_samples: -1
-  combine_method: "mad_weighted"
-  save_anomaly_maps: True
+  combine_method: simple
+  data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/visa
+  dataset: visa
+  input_size: 256
+  layers: layer123
+  n_steps: 16
+  save_anomaly_maps: true
+  snn_mode: '0.4'
+  timesteps:
+  - 16
+  use_membrane: false
+  use_zscore: true

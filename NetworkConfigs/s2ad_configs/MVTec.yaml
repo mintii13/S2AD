@@ -2,7 +2,7 @@ Network:
   backbone: vgg16
   batch_size: 16
   calib_samples: -1
-  combine_method: mad_weighted
+  combine_method: simple
   data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
   dataset: mvtec
   input_size: 256
@@ -13,3 +13,4 @@ Network:
   timesteps:
   - 16
   use_membrane: false
+  use_zscore: true

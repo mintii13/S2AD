@@ -157,32 +157,37 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
         for imgs, _, _ in normal_loader:
             imgs = imgs.to(device)
             B = imgs.shape[0]
-            functional.reset_net(snn_encoder)
+            chunk_size = max(1, 16 * 16 // timesteps)
             
-            imgs_T = imgs.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
-            outputs = snn_encoder(imgs_T)
-            
-            for idx, name in zip(layer_indices, layer_names):
-                feat = outputs[idx]
-                spike = (feat > 0).float()
-                rate = spike.mean(dim=0)
-                if sum_rates[name] is None:
-                    sum_rates[name] = rate.sum(dim=0).cpu()
-                    sum_sq_rates[name] = (rate ** 2).sum(dim=0).cpu()
-                else:
-                    sum_rates[name] += rate.sum(dim=0).cpu()
-                    sum_sq_rates[name] += (rate ** 2).sum(dim=0).cpu()
-                current_max = rate.max().item()
-                if current_max > max_rates[name]: max_rates[name] = current_max
-            count += B
-            
-            # === CLEANUP MEMORY ===
-            functional.reset_net(snn_encoder)
-            del imgs_T
-            del outputs
-            del feat
-            del spike
-            del rate
+            for i in range(0, B, chunk_size):
+                chunk = imgs[i:i+chunk_size]
+                chunk_B = chunk.shape[0]
+                functional.reset_net(snn_encoder)
+                
+                imgs_T = chunk.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+                outputs = snn_encoder(imgs_T)
+                
+                for idx, name in zip(layer_indices, layer_names):
+                    feat = outputs[idx]
+                    spike = (feat > 0).float()
+                    rate = spike.mean(dim=0)
+                    if sum_rates[name] is None:
+                        sum_rates[name] = rate.sum(dim=0).cpu()
+                        sum_sq_rates[name] = (rate ** 2).sum(dim=0).cpu()
+                    else:
+                        sum_rates[name] += rate.sum(dim=0).cpu()
+                        sum_sq_rates[name] += (rate ** 2).sum(dim=0).cpu()
+                    current_max = rate.max().item()
+                    if current_max > max_rates[name]: max_rates[name] = current_max
+                count += chunk_B
+                
+                # === CLEANUP MEMORY ===
+                functional.reset_net(snn_encoder)
+                del imgs_T
+                del outputs
+                del feat
+                del spike
+                del rate
             
     means, stats = {}, {}
     for name in layer_names:
@@ -200,26 +205,31 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
         for imgs, _, _ in normal_loader:
             imgs = imgs.to(device)
             B = imgs.shape[0]
-            functional.reset_net(snn_encoder)
+            chunk_size = max(1, 16 * 16 // timesteps)
             
-            imgs_T = imgs.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
-            outputs = snn_encoder(imgs_T)
-            
-            for idx, name in zip(layer_indices, layer_names):
-                feat = outputs[idx]
-                spike = (feat > 0).float()
-                rate = spike.mean(dim=0)
-                abs_dev = torch.abs(rate - means[name].to(device)).mean().item()
-                sum_abs_dev[name] += abs_dev * B
-            count += B
-            
-            # === CLEANUP MEMORY ===
-            functional.reset_net(snn_encoder)
-            del imgs_T
-            del outputs
-            del feat
-            del spike
-            del rate
+            for i in range(0, B, chunk_size):
+                chunk = imgs[i:i+chunk_size]
+                chunk_B = chunk.shape[0]
+                functional.reset_net(snn_encoder)
+                
+                imgs_T = chunk.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+                outputs = snn_encoder(imgs_T)
+                
+                for idx, name in zip(layer_indices, layer_names):
+                    feat = outputs[idx]
+                    spike = (feat > 0).float()
+                    rate = spike.mean(dim=0)
+                    abs_dev = torch.abs(rate - means[name].to(device)).mean().item()
+                    sum_abs_dev[name] += abs_dev * chunk_B
+                count += chunk_B
+                
+                # === CLEANUP MEMORY ===
+                functional.reset_net(snn_encoder)
+                del imgs_T
+                del outputs
+                del feat
+                del spike
+                del rate
             
     torch.cuda.empty_cache() # Dọn dẹp sau loop 2
     
@@ -234,17 +244,37 @@ def compute_normal_stats(snn_encoder, normal_loader, device, timesteps, layers='
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_firing_rates(snn_encoder, img_tensor, device, timesteps, layers='layer23'):
-    functional.reset_net(snn_encoder)
     layer_indices, layer_names = get_layer_indices_and_names(layers)
     rates = {}
     with torch.no_grad():
-        imgs_T = img_tensor.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
-        outputs = snn_encoder(imgs_T)
+        B = img_tensor.shape[0]
+        chunk_size = max(1, 16 * 16 // timesteps)
         
-        for idx, name in zip(layer_indices, layer_names):
-            feat = outputs[idx]
-            spike = (feat > 0).float()
-            rates[name] = spike.mean(dim=0)
+        for i in range(0, B, chunk_size):
+            chunk = img_tensor[i:i+chunk_size]
+            functional.reset_net(snn_encoder)
+            
+            imgs_T = chunk.unsqueeze(0).repeat(timesteps, 1, 1, 1, 1)
+            outputs = snn_encoder(imgs_T)
+            
+            for idx, name in zip(layer_indices, layer_names):
+                feat = outputs[idx]
+                spike = (feat > 0).float()
+                rate_chunk = spike.mean(dim=0)
+                
+                if name not in rates:
+                    rates[name] = []
+                rates[name].append(rate_chunk)
+                
+            functional.reset_net(snn_encoder)
+            del imgs_T
+            del outputs
+            del feat
+            del spike
+            del rate_chunk
+            
+        for name in layer_names:
+            rates[name] = torch.cat(rates[name], dim=0)
             
     return rates
 

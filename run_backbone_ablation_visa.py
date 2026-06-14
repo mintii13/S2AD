@@ -160,7 +160,7 @@ def process_dataset(dataset, classes, config_path, results_dir):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)['Network']
         
-    config['batch_size'] = 16
+    config['batch_size'] = 8
     config['input_size'] = 256
     glv.network_config = config
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

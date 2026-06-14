@@ -326,19 +326,23 @@ class HardwareFriendlyInterpolator(nn.Module):
         super().__init__()
         H_in, W_in = in_shape
         H_out, W_out = out_shape
+        self.in_shape = in_shape
         self.out_shape = out_shape
         
-        # Biến phép nội suy thành các kết nối Neuromorphic Synapse (Linear Layer)
-        self.linear = nn.Linear(H_in * W_in, H_out * W_out, bias=False)
-        
-        # Dùng ma trận đơn vị để "trích xuất" chính xác bộ trọng số Bilinear
-        with torch.no_grad():
-            identity = torch.eye(H_in * W_in).view(H_in * W_in, 1, H_in, W_in)
-            mapped = F.interpolate(identity, size=(H_out, W_out), mode='bilinear', align_corners=False)
-            W_matrix = mapped.view(H_in * W_in, H_out * W_out)
-            self.linear.weight.data = W_matrix.t() # (out_features, in_features)
+        if in_shape != out_shape:
+            # Biến phép nội suy thành các kết nối Neuromorphic Synapse (Linear Layer)
+            self.linear = nn.Linear(H_in * W_in, H_out * W_out, bias=False)
+            
+            # Dùng ma trận đơn vị để "trích xuất" chính xác bộ trọng số Bilinear
+            with torch.no_grad():
+                identity = torch.eye(H_in * W_in).view(H_in * W_in, 1, H_in, W_in)
+                mapped = F.interpolate(identity, size=(H_out, W_out), mode='bilinear', align_corners=False)
+                W_matrix = mapped.view(H_in * W_in, H_out * W_out)
+                self.linear.weight.data = W_matrix.t() # (out_features, in_features)
 
     def forward(self, x):
+        if self.in_shape == self.out_shape:
+            return x
         B = x.shape[0]
         x_flat = x.view(B, -1)
         y_flat = self.linear(x_flat)
@@ -405,51 +409,104 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
     return score_maps, img_scores
 
 def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name, use_zscore=True, alpha=0.0):
+    """Evaluate using the EXACT same scoring logic as evaluate_fast_ablation, single pass, with optional map saving."""
     import cv2
     import time
-    start_test_time = time.time()
-    img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps = [], [], [], [], [], []
+    from spikingjelly.activation_based import functional
+    
+    start_time = time.time()
+    total_save_time = 0.0
+    img_scores, img_labels, pix_scores, pix_labels, gt_masks, anomaly_maps_list = [], [], [], [], [], []
+    img_idx = 0
+    
+    if save_maps and maps_dir:
+        from ad_eval import IMAGENET_MEAN, IMAGENET_STD
+        mean_t, std_t = torch.tensor(IMAGENET_MEAN).view(3,1,1), torch.tensor(IMAGENET_STD).view(3,1,1)
     
     for imgs, lbls, gt_paths in test_loader:
-        score_maps, batch_img_scores = score_image_batch(snn_encoder, imgs, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, use_zscore, alpha)
+        imgs = imgs.to(device)
+        B = imgs.size(0)
         
-        for b in range(imgs.size(0)):
+        # === Scoring logic identical to evaluate_fast_ablation ===
+        rates = get_firing_rates(snn_encoder, imgs, device, timesteps, layers)
+        
+        deviations = {}
+        for layer_name, rate in rates.items():
+            hw_layer = get_zscore_layer(layer_name, normal_stats, device, use_zscore=True, alpha=alpha)
+            with torch.no_grad():
+                deviations[layer_name] = hw_layer(rate)
+        
+        target_name = list(deviations.keys())[0]
+        target_res = deviations[target_name].shape[1:]
+        weighted_sum, total_weight = None, 0.0
+        
+        for layer_name, dev in deviations.items():
+            if dev.shape[1:] != target_res:
+                interpolator = get_interpolator(dev.shape[1:], target_res, device)
+                with torch.no_grad():
+                    dev = interpolator(dev)
+            
+            if combine_method == 'mad_weighted':
+                mad = normal_stats[layer_name]['mad']
+                weight = 1.0 / (mad + 1e-8)
+            else:
+                weight = 1.0
+            
+            total_weight += weight
+            if weighted_sum is None:
+                weighted_sum = dev * weight
+            else:
+                weighted_sum += dev * weight
+        
+        score_spatial = weighted_sum / total_weight if combine_method == 'mad_weighted' else weighted_sum / len(deviations)
+        final_interpolator = get_interpolator(score_spatial.shape[1:], (img_size, img_size), device)
+        
+        with torch.no_grad():
+            score_maps = final_interpolator(score_spatial).cpu().numpy()
+        batch_img_scores = [float(np.max(sm)) for sm in score_maps]
+        # === End scoring logic ===
+        
+        for b in range(B):
             score_map = score_maps[b]
-            img_score = batch_img_scores[b]
             lbl = lbls[b].item()
             gt_path = gt_paths[b]
             
-            img_scores.append(img_score)
+            img_scores.append(batch_img_scores[b])
             img_labels.append(lbl)
             
+            # Save anomaly map if requested (excluded from test_time)
             if save_maps and maps_dir:
+                t_save = time.time()
                 subfolder_name = 'abnormal' if lbl == 1 else 'good'
                 save_dir = os.path.join(maps_dir, subfolder_name)
                 os.makedirs(save_dir, exist_ok=True)
-                
-                from ad_eval import IMAGENET_MEAN, IMAGENET_STD
-                mean, std = torch.tensor(IMAGENET_MEAN).view(3,1,1), torch.tensor(IMAGENET_STD).view(3,1,1)
-                orig_img = (imgs[b].cpu() * std + mean).clamp(0,1).permute(1,2,0).numpy()
+                orig_img = (imgs[b].cpu() * std_t + mean_t).clamp(0,1).permute(1,2,0).numpy()
                 orig_img = (orig_img * 255).astype(np.uint8)
+                
+                gt_mask_vis = None
+                if lbl == 1 and gt_path and os.path.exists(gt_path):
+                    gt_mask_vis = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
+                    gt_mask_vis = (gt_mask_vis > 127).astype(np.uint8) * 255
+                save_anomaly_map(orig_img, score_map, gt_mask_vis, save_dir, img_idx)
+                img_idx += 1
+                total_save_time += time.time() - t_save
             
-            gt_mask = None
-            if lbl == 1 and gt_path and os.path.exists(gt_path):
-                gt_mask = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
-                gt_mask = (gt_mask > 127).astype(np.uint8) * 255
-            
-            if save_maps and maps_dir:
-                save_anomaly_map(orig_img, score_map, gt_mask, save_dir, len(img_scores) - 1)
-        
+            # Collect for PRO metric
             if lbl == 1 and gt_path and os.path.exists(gt_path):
                 gt = cv2.resize(cv2.imread(gt_path, 0), (img_size, img_size))
                 gt_bin = (gt > 127).astype(int)
                 pix_scores.extend(score_map.flatten())
                 pix_labels.extend(gt_bin.flatten())
                 gt_masks.append(gt_bin)
-                anomaly_maps.append(score_map)
-                
-    test_time = time.time() - start_test_time
-            
+                anomaly_maps_list.append(score_map)
+        
+        # Cleanup per batch
+        functional.reset_net(snn_encoder)
+        del rates, deviations, score_maps
+        torch.cuda.empty_cache()
+    
+    test_time = time.time() - start_time - total_save_time
+    
     img_auc = roc_auc_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
     img_ap = average_precision_score(img_labels, img_scores) if len(set(img_labels)) == 2 else 0.0
     prec, rec, _ = precision_recall_curve(img_labels, img_scores)
@@ -460,8 +517,10 @@ def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, 
     if pix_labels:
         pprec, prec_rec, _ = precision_recall_curve(pix_labels, pix_scores)
         pix_f1 = np.max(2 * (pprec * prec_rec) / (pprec + prec_rec + 1e-8)) if len(pprec) > 0 else 0.0
-    else: pix_f1 = 0.0
-    pro_score = compute_pro_metric(gt_masks, anomaly_maps) if gt_masks else 0.0
+    else:
+        pix_f1 = 0.0
+    pro_score = compute_pro_metric(gt_masks, anomaly_maps_list) if gt_masks else 0.0
+    
     return {'img_auc': img_auc, 'img_ap': img_ap, 'img_f1': img_f1, 'pix_auc': pix_auc, 'pix_ap': pix_ap, 'pix_f1': pix_f1, 'pro': pro_score, 'test_time': test_time}, img_scores, img_labels
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -493,7 +552,7 @@ def main():
     category_name = args.category if args.category else args.name
 
     config = parse(args.config)['Network']
-    config['batch_size'] = config.get('batch_size', 16)
+    config['batch_size'] = config.get('batch_size', 8)
     config['input_size'] = config.get('input_size', 256)
     glv.network_config = config
     os.makedirs(args.project_save_path, exist_ok=True)
@@ -545,6 +604,24 @@ def main():
     print(f'\n{"Timestep":>8} | {"Img AUC":>8} | {"Img AP":>8} | {"Img F1":>8} | {"Pix AUC":>8} | {"Pix AP":>8} | {"Pix F1":>8} | {"PRO":>8} | {"mAD":>8} | {"Train(s)":>8} | {"Test(s)":>7} | {"FPS":>7}')
     print('-' * 135)
     
+    # CUDA Warmup để tránh việc T=4 bị gánh overhead 10s khởi tạo
+    print("  [CUDA Warmup] Initializing cuDNN and allocating cache...")
+    from spikingjelly.clock_driven import functional
+    snn_encoder.eval()
+    with torch.no_grad():
+        dummy_input = torch.randn(2, 3, img_size, img_size).to(device)
+        dummy_spike = dummy_input.unsqueeze(0).repeat(max(timesteps), 1, 1, 1, 1)
+        _ = snn_encoder(dummy_spike)
+        functional.reset_net(snn_encoder)
+        
+        # Warmup Interpolators (cái này tốn 10s vì khởi tạo nn.Linear hàng triệu params)
+        _ = get_interpolator((128, 128), (img_size, img_size), device)
+        _ = get_interpolator((64, 64), (img_size, img_size), device)
+        _ = get_interpolator((32, 32), (img_size, img_size), device)
+        
+    torch.cuda.empty_cache()
+    import gc; gc.collect()
+
     results = {}
     firing_rate_stats = {}
     for T in timesteps:
@@ -582,7 +659,11 @@ def main():
                 fa.write(f"\n{'Epoch':>8} | {'Img AUC':>8} | {'Img AP':>8} | {'Img F1':>8} | {'Pix AUC':>8} | {'Pix AP':>8} | {'Pix F1':>8} | {'PRO':>8} | {'mAD':>8} | {'TrainLoss':>9} | {'TestLoss':>9} | {'Train(s)':>8} | {'Test(s)':>8} | {'FPS':>8}\n")
                 fa.write('-' * 155 + '\n')
             fa.write(f'{199:8d} | {metrics["img_auc"]:8.4f} | {metrics["img_ap"]:8.4f} | {metrics["img_f1"]:8.4f} | {metrics["pix_auc"]:8.4f} | {metrics["pix_ap"]:8.4f} | {metrics["pix_f1"]:8.4f} | {metrics["pro"]:8.4f} | {metrics["mad_metric"]:8.4f} | {0.0:9.4f} | {0.0:9.4f} | {train_time:8.1f} | {test_time:8.2f} | {fps:8.2f}\n')
-        
+            
+        del normal_stats
+        del metrics
+        import gc
+        gc.collect()
     out_path = os.path.join(args.project_save_path, f'{category_name}_s2ad_results.txt')
     with open(out_path, 'w') as f:
         f.write(f"S2AD Results - {category_name}\n")

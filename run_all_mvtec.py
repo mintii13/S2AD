@@ -9,9 +9,9 @@ CLASSES = [
     'tile', 'toothbrush', 'transistor', 'wood', 'zipper'
 ]
 
-TIMESTEPS = [32]
-CONFIG_PATH = 'NetworkConfigs/esvae_configs/MVTec.yaml'
-RESULTS_DIR = './results_vgg16_m0.8_a0.01_t32'
+TIMESTEPS = [64]
+CONFIG_PATH = 'NetworkConfigs/s2ad_configs/MVTec.yaml'
+RESULTS_DIR = './results_vgg16_m0.8_a0.01_t64'
 
 def update_yaml_nsteps(path, n_steps):
     with open(path, 'r') as f:
@@ -103,7 +103,7 @@ def main():
         main_script = 'main_fsvae.py'
     else:
         config_path = 'NetworkConfigs/s2ad_configs/MVTec.yaml'
-        results_dir = './results_vgg16_m0.8_a0.01_t32'
+        results_dir = './results_vgg16_m0.8_a0.01_t64'
         main_script = 'main_s2ad.py'
 
     os.makedirs(results_dir, exist_ok=True)

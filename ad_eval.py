@@ -91,6 +91,7 @@ import time
 
 def evaluate_ad(net, test_loader, device, epoch, args, dataset_name, cumulative_train_time=0.0, train_loss=0.0, test_loss=0.0):
     start_test_time = time.time()
+    total_save_time = 0.0
     net.eval()
     img_scores, img_labels = [], []
     pix_scores, pix_labels = [], []
@@ -133,6 +134,7 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name, cumulative_
                         gt_mask = (gt_mask > 127).astype(np.uint8) * 255
                         
                 if maps_dir:
+                    t_save = time.time()
                     subfolder_name = 'good' if label == 0 else 'abnormal'
                     save_dir = os.path.join(maps_dir, subfolder_name)
                     os.makedirs(save_dir, exist_ok=True)
@@ -141,6 +143,7 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name, cumulative_
                     orig_img = orig_img.clamp(0,1).permute(1,2,0).numpy()
                     orig_img = (orig_img * 255).astype(np.uint8)
                     save_anomaly_map(orig_img, score_map, gt_mask, save_dir, i * img.size(0) + b)
+                    total_save_time += time.time() - t_save
 
                 if label == 1 and gt_p:
                     if gt_mask is not None:
@@ -150,7 +153,7 @@ def evaluate_ad(net, test_loader, device, epoch, args, dataset_name, cumulative_
                         gt_masks.append(gt_bin)
                         anomaly_maps.append(score_map)
                         
-    test_time = time.time() - start_test_time
+    test_time = time.time() - start_test_time - total_save_time
     total_imgs = len(img_scores)
     fps = total_imgs / test_time if test_time > 0 else 0
                         

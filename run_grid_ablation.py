@@ -186,7 +186,7 @@ def process_dataset(dataset, classes, config_path, results_dir):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)['Network']
         
-    config['batch_size'] = config.get('batch_size', 16)
+    config['batch_size'] = config.get('batch_size', 8)
     config['input_size'] = config.get('input_size', 256)
     glv.network_config = config
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -215,7 +215,7 @@ def process_dataset(dataset, classes, config_path, results_dir):
         print(f"{'='*80}")
         
         # 1. Load data ONCE per class (for SNN conversion)
-        glv.network_config['batch_size'] = 16
+        glv.network_config['batch_size'] = 8
         if dataset == 'mvtec':
             train_loader, test_loader = load_mvtec(config['data_path'], cls, shuffle_train=False, drop_last_train=False, normalize='imagenet')
         else:

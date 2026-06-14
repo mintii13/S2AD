@@ -1,6 +1,6 @@
 Network:
   backbone: vgg16
-  batch_size: 16
+  batch_size: 8
   calib_samples: -1
   combine_method: mad_weighted
   data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/visa

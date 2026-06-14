@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import argparse
 import gc
 import numpy as np
@@ -287,7 +288,6 @@ def process_dataset(dataset, classes, config_path, results_dir):
                 
                 print(f"    [TS={ts}] Completed! Checkpoint saved.")
                 
-                main_s2ad._zscore_cache.clear()
                 main_s2ad._interpolators_cache.clear()
                 del normal_stats
                 torch.cuda.empty_cache()
@@ -309,9 +309,20 @@ def process_dataset(dataset, classes, config_path, results_dir):
     summarize_results(csv_path, dataset, txt_path)
     print(f"\n[INFO] Grid search completed for {dataset.upper()}! Summary saved to: {txt_path}")
 
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-dataset', type=str, default='both', choices=['mvtec', 'visa', 'both'])
+    seed_everything(42)
+    parser = argparse.ArgumentParser(description="Grid Search Ablation for S2AD (MVTec/VisA)")
+    parser.add_argument('--dataset', type=str, default='both', choices=['mvtec', 'visa', 'both'])
     args = parser.parse_args()
     
     if args.dataset in ['mvtec', 'both']:

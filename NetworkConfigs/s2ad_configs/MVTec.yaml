@@ -2,15 +2,15 @@ Network:
   backbone: vgg16
   batch_size: 16
   calib_samples: -1
-  combine_method: simple
+  combine_method: mad_weighted
   data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
   dataset: mvtec
   input_size: 256
   layers: layer123
-  n_steps: 16
+  n_steps: 32
   save_anomaly_maps: true
-  snn_mode: '0.4'
+  snn_mode: '0.8'
   timesteps:
-  - 16
+  - 32
   use_membrane: false
   use_zscore: true

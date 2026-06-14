@@ -136,6 +136,7 @@ def get_layer_indices_and_names(layers):
     mapping = {
         'layer1': ([0], ['layer1']), 'layer2': ([0], ['layer2']), 'layer3': ([0], ['layer3']),
         'layer12': ([0, 1], ['layer1', 'layer2']), 'layer23': ([0, 1], ['layer2', 'layer3']),
+        'layer13': ([0, 2], ['layer1', 'layer3']),
         'layer123': ([0, 1, 2], ['layer1', 'layer2', 'layer3']),
     }
     return mapping.get(layers, ([0, 1], ['layer2', 'layer3']))
@@ -352,16 +353,12 @@ def get_interpolator(in_shape, out_shape, device):
         _interpolators_cache[key] = interpolator
     return _interpolators_cache[key]
 
-_zscore_cache = {}
 def get_zscore_layer(layer_name, normal_stats, device, use_zscore, alpha=0.0):
-    cache_key = f"{layer_name}_{use_zscore}_{alpha}"
-    if cache_key not in _zscore_cache:
-        mean = normal_stats[layer_name]['mean'].to(device)
-        std = normal_stats[layer_name]['std'].to(device)
-        hw_layer = HardwareFriendlyZScoreAbs(mean, std, use_zscore=use_zscore, alpha=alpha).to(device)
-        hw_layer.eval()
-        _zscore_cache[cache_key] = hw_layer
-    return _zscore_cache[cache_key]
+    mean = normal_stats[layer_name]['mean'].to(device)
+    std = normal_stats[layer_name]['std'].to(device)
+    hw_layer = HardwareFriendlyZScoreAbs(mean, std, use_zscore=use_zscore, alpha=alpha).to(device)
+    hw_layer.eval()
+    return hw_layer
 
 def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, layers='layer23', img_size=256, use_membrane=False, combine_method='simple', use_zscore=True, alpha=0.0):
     snn_encoder.eval()

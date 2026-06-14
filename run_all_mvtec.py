@@ -9,9 +9,9 @@ CLASSES = [
     'tile', 'toothbrush', 'transistor', 'wood', 'zipper'
 ]
 
-TIMESTEPS = [16]
+TIMESTEPS = [32]
 CONFIG_PATH = 'NetworkConfigs/esvae_configs/MVTec.yaml'
-RESULTS_DIR = './results_esvae_d1024'
+RESULTS_DIR = './results_vgg16_m0.8_a0.01_t32'
 
 def update_yaml_nsteps(path, n_steps):
     with open(path, 'r') as f:
@@ -103,7 +103,7 @@ def main():
         main_script = 'main_fsvae.py'
     else:
         config_path = 'NetworkConfigs/s2ad_configs/MVTec.yaml'
-        results_dir = './results_s2ad_0.4'
+        results_dir = './results_vgg16_m0.8_a0.01_t32'
         main_script = 'main_s2ad.py'
 
     os.makedirs(results_dir, exist_ok=True)
@@ -128,11 +128,13 @@ def main():
             print(f"\n---> Training class: [{cls}] with T={t}")
             cmd = [
                 "python", main_script,
-                "-name", f"T{t}_{args.model}_exp_name",
+                "-name", f"T{t}_{args.model}_golden",
                 "-category", cls,
                 "-config", config_path,
                 "-project_save_path", results_dir
             ]
+            if args.model == 's2ad':
+                cmd.extend(["-alpha", "0.01"])
             
             if args.resume:
                 existing_metrics = get_last_metrics('mvtec', cls, t, results_dir)

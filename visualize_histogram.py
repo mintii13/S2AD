@@ -103,6 +103,12 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
     out_dir = os.path.join('visualizations_s2ad', category)
     os.makedirs(out_dir, exist_ok=True)
     
+    test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d))]
+    total_test_imgs = sum([len(glob.glob(os.path.join(test_dir_base, d, '*.png'))) for d in test_folders])
+    if len(glob.glob(os.path.join(out_dir, '*.png'))) >= total_test_imgs:
+        print(f"[{category}] Đã vẽ xong {total_test_imgs}/{total_test_imgs} ảnh. Tự động Resume bỏ qua class này!")
+        return
+    
     normal_paths = sorted(glob.glob(f"{normal_dir}/*.png"))
     if not normal_paths:
         print(f"Bỏ qua {category} vì không tìm thấy ảnh normal.")
@@ -125,21 +131,30 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
     for imgs, _ in tqdm(normal_loader, desc="Pass 1", leave=False):
         imgs = imgs.to(device)
         B = imgs.shape[0]
-        functional.reset_net(snn_model)
-        with torch.no_grad():
-            imgs_T = imgs.unsqueeze(0).repeat(T, 1, 1, 1, 1)
-            outputs = snn_model(imgs_T)
-            for idx, l in zip([0, 1, 2], ['layer1', 'layer2', 'layer3']):
-                rate = (outputs[idx] > 0).float().mean(dim=0)
-                if sum_rates[l] is None:
-                    sum_rates[l] = rate.sum(dim=0).cpu()
-                    sum_sq_rates[l] = (rate ** 2).sum(dim=0).cpu()
-                else:
-                    sum_rates[l] += rate.sum(dim=0).cpu()
-                    sum_sq_rates[l] += (rate ** 2).sum(dim=0).cpu()
-                m_val = rate.max().item()
-                if m_val > max_rates[l]: max_rates[l] = m_val
+        chunk_size = max(1, 16 * 16 // T)
+        
+        for i in range(0, B, chunk_size):
+            chunk = imgs[i:i+chunk_size]
+            functional.reset_net(snn_model)
+            with torch.no_grad():
+                imgs_T = chunk.unsqueeze(0).repeat(T, 1, 1, 1, 1)
+                outputs = snn_model(imgs_T)
+                for idx, l in zip([0, 1, 2], ['layer1', 'layer2', 'layer3']):
+                    rate = (outputs[idx] > 0).float().mean(dim=0)
+                    if sum_rates[l] is None:
+                        sum_rates[l] = rate.sum(dim=0).cpu()
+                        sum_sq_rates[l] = (rate ** 2).sum(dim=0).cpu()
+                    else:
+                        sum_rates[l] += rate.sum(dim=0).cpu()
+                        sum_sq_rates[l] += (rate ** 2).sum(dim=0).cpu()
+                    m_val = rate.max().item()
+                    if m_val > max_rates[l]: max_rates[l] = m_val
+            
+            functional.reset_net(snn_model)
+            del imgs_T, outputs
+            
         count += B
+        torch.cuda.empty_cache()
         gc.collect()
 
     stats = {}
@@ -154,15 +169,24 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
     for imgs, _ in tqdm(normal_loader, desc="Pass 2", leave=False):
         imgs = imgs.to(device)
         B = imgs.shape[0]
-        functional.reset_net(snn_model)
-        with torch.no_grad():
-            imgs_T = imgs.unsqueeze(0).repeat(T, 1, 1, 1, 1)
-            outputs = snn_model(imgs_T)
-            for idx, l in zip([0, 1, 2], ['layer1', 'layer2', 'layer3']):
-                rate = (outputs[idx] > 0).float().mean(dim=0)
-                abs_dev = torch.abs(rate - stats[l]['mean']).mean().item()
-                sum_abs_dev[l] += abs_dev * B
+        chunk_size = max(1, 16 * 16 // T)
+        
+        for i in range(0, B, chunk_size):
+            chunk = imgs[i:i+chunk_size]
+            functional.reset_net(snn_model)
+            with torch.no_grad():
+                imgs_T = chunk.unsqueeze(0).repeat(T, 1, 1, 1, 1)
+                outputs = snn_model(imgs_T)
+                for idx, l in zip([0, 1, 2], ['layer1', 'layer2', 'layer3']):
+                    rate = (outputs[idx] > 0).float().mean(dim=0)
+                    abs_dev = torch.abs(rate - stats[l]['mean']).mean().item()
+                    sum_abs_dev[l] += abs_dev * chunk.shape[0]
+                    
+            functional.reset_net(snn_model)
+            del imgs_T, outputs
+            
         count += B
+        torch.cuda.empty_cache()
         gc.collect()
 
     for l in ['layer1', 'layer2', 'layer3']:
@@ -186,6 +210,12 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
         
         for image_path in tqdm(t_paths, desc=t_folder, leave=False):
             filename = os.path.basename(image_path)
+            
+            save_name = f"{t_folder}_{filename}"
+            save_path = os.path.join(out_dir, save_name)
+            if os.path.exists(save_path):
+                continue
+                
             mask_name = filename.replace('.png', '_mask.png')
             mask_path = os.path.join(gt_dir_base, t_folder, mask_name)
             
@@ -213,12 +243,14 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
             for l in ['layer1', 'layer2', 'layer3']:
                 mean_r = stats[l]['mean'].squeeze(0)
                 std_r = stats[l]['std'].squeeze(0)
+                max_r = stats[l]['max_rate']
+                smooth_std = std_r + 0.01 * max_r
                 test_r = test_rates[l]
                 
                 raw_maps['1_normal'][l] = mean_r.mean(dim=0).unsqueeze(0).unsqueeze(0)
                 raw_maps['2_test'][l] = test_r.mean(dim=0).unsqueeze(0).unsqueeze(0)
                 raw_maps['3_abs_diff'][l] = torch.abs(test_r - mean_r).mean(dim=0).unsqueeze(0).unsqueeze(0)
-                raw_maps['4_zscore'][l] = (torch.abs(test_r - mean_r) / std_r).mean(dim=0).unsqueeze(0).unsqueeze(0)
+                raw_maps['4_zscore'][l] = (torch.abs(test_r - mean_r) / (smooth_std + 1e-8)).mean(dim=0).unsqueeze(0).unsqueeze(0)
 
                 maps[l] = {k: F.interpolate(raw_maps[k][l], size=(256, 256), mode='bilinear', align_corners=False).squeeze().cpu().numpy() for k in raw_maps.keys()}
 

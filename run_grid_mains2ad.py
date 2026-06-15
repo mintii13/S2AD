@@ -21,7 +21,7 @@ def generate_summaries(csv_path, results_dir, dataset, target_mode):
 
 def process_dataset(dataset):
     MODES = ['max', '0.8', '0.6', '0.4', '0.2']
-    TARGET_MODE = '0.6' if dataset == 'visa' else '0.8'
+    TARGET_MODE = '0.6' if dataset == 'visa' else '0.6'
     TIMESTEPS = [4, 8, 16, 32, 64]
     
     results_dir = f'./results_grid_mains2ad_{dataset}'

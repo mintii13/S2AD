@@ -538,16 +538,21 @@ def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 def main():
-    seed_everything(42)
-    g = torch.Generator(); g.manual_seed(42)
-    
     parser = argparse.ArgumentParser()
     parser.add_argument('-name', type=str, required=True, help='Category name or Exp name')
     parser.add_argument('-category', type=str, default='', help='Category name (for compatibility with run_all scripts)')
     parser.add_argument('-config', type=str, required=True, help='Path to yaml config')
     parser.add_argument('-project_save_path', type=str, default='./results_s2ad')
     parser.add_argument('-alpha', type=float, default=None, help='Soft Z-score alpha')
+    parser.add_argument('-seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
+    
+    seed_everything(args.seed)
+    g = torch.Generator(); g.manual_seed(args.seed)
+    
+    print("\n" + "="*50)
+    print(f"🚀 THÔNG BÁO TỪ HỆ THỐNG: ĐANG DÙNG SEED = {args.seed} 🚀")
+    print("="*50 + "\n")
     
     category_name = args.category if args.category else args.name
 

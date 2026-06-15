@@ -1,0 +1,20 @@
+Network:
+  backbone: resnet50
+  batch_size: 8
+  calib_samples: -1
+  combine_method: mad_weighted
+  data_path: /home/minhtringuyen/ANN2SNN/dataloader/datasets/mvtec
+  dataset: mvtec
+  input_size: 256
+  layers: layer123
+  n_steps: 64
+  save_anomaly_maps: false
+  snn_mode: '0.6'
+  timesteps:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  use_membrane: false
+  use_zscore: true

@@ -432,7 +432,7 @@ def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, 
         
         deviations = {}
         for layer_name, rate in rates.items():
-            hw_layer = get_zscore_layer(layer_name, normal_stats, device, use_zscore=True, alpha=alpha)
+            hw_layer = get_zscore_layer(layer_name, normal_stats, device, use_zscore=use_zscore, alpha=alpha)
             with torch.no_grad():
                 deviations[layer_name] = hw_layer(rate)
         
@@ -610,22 +610,22 @@ def main():
     print('-' * 135)
     
     # CUDA Warmup để tránh việc T=4 bị gánh overhead 10s khởi tạo
-    print("  [CUDA Warmup] Initializing cuDNN and allocating cache...")
-    from spikingjelly.clock_driven import functional
-    snn_encoder.eval()
-    with torch.no_grad():
-        dummy_input = torch.randn(2, 3, img_size, img_size).to(device)
-        dummy_spike = dummy_input.unsqueeze(0).repeat(max(timesteps), 1, 1, 1, 1)
-        _ = snn_encoder(dummy_spike)
-        functional.reset_net(snn_encoder)
+    # print("  [CUDA Warmup] Initializing cuDNN and allocating cache...")
+    # from spikingjelly.clock_driven import functional
+    # snn_encoder.eval()
+    # with torch.no_grad():
+    #     dummy_input = torch.randn(2, 3, img_size, img_size).to(device)
+    #     dummy_spike = dummy_input.unsqueeze(0).repeat(max(timesteps), 1, 1, 1, 1)
+    #     _ = snn_encoder(dummy_spike)
+    #     functional.reset_net(snn_encoder)
         
-        # Warmup Interpolators (cái này tốn 10s vì khởi tạo nn.Linear hàng triệu params)
-        _ = get_interpolator((128, 128), (img_size, img_size), device)
-        _ = get_interpolator((64, 64), (img_size, img_size), device)
-        _ = get_interpolator((32, 32), (img_size, img_size), device)
+    #     # Warmup Interpolators (cái này tốn 10s vì khởi tạo nn.Linear hàng triệu params)
+    #     _ = get_interpolator((128, 128), (img_size, img_size), device)
+    #     _ = get_interpolator((64, 64), (img_size, img_size), device)
+    #     _ = get_interpolator((32, 32), (img_size, img_size), device)
         
-    torch.cuda.empty_cache()
-    import gc; gc.collect()
+    # torch.cuda.empty_cache()
+    # import gc; gc.collect()
 
     results = {}
     firing_rate_stats = {}

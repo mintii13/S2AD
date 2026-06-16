@@ -7,7 +7,7 @@ from run_grid_ablation import MVTEC_CLASSES
 
 def process_calibration_ablation():
     dataset = 'mvtec'
-    TARGET_MODE = '0.8'
+    TARGET_MODE = '0.6'
     TS = 32
     
     results_dir = f'./results_paper_calibration'
@@ -29,8 +29,8 @@ def process_calibration_ablation():
     with open(base_config_path, 'r') as f:
         base_config = yaml.safe_load(f)
         
-    # 0 means Full dataset
-    k_shots_list = [1, 2, 4, 10, 50, 100, 0]
+    # 0 means Full dataset (tương đương Full S2AD đã chạy ở grid search, nên bỏ qua để đỡ tốn thời gian)
+    k_shots_list = [1, 2, 4, 10, 50, 100]
         
     for cls in MVTEC_CLASSES:
         for k_shots in k_shots_list:
@@ -46,11 +46,13 @@ def process_calibration_ablation():
             temp_config = base_config.copy()
             temp_config['Network']['snn_mode'] = TARGET_MODE
             temp_config['Network']['timesteps'] = [TS]
+            temp_config['Network']['batch_size'] = 8
             temp_config['Network']['save_anomaly_maps'] = False
             temp_config['Network']['layers'] = 'layer123'
             temp_config['Network']['combine_method'] = 'mad_weighted'
             temp_config['Network']['use_zscore'] = True
-            temp_config['Network']['calib_samples'] = k_shots
+            # Nếu k_shots == 0 thì gán -1 để main_s2ad.py lấy full dataset
+            temp_config['Network']['calib_samples'] = -1 if k_shots == 0 else k_shots
             
             with open(temp_config_path, 'w') as f:
                 yaml.dump(temp_config, f)
@@ -64,6 +66,7 @@ def process_calibration_ablation():
                 "-category", cls,
                 "-config", temp_config_path,
                 "-alpha", "0.01",
+                "-seed", "42",
                 "-project_save_path", temp_save_path
             ]
             

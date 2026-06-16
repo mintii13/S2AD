@@ -103,7 +103,7 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
     out_dir = os.path.join('visualizations_s2ad', category)
     os.makedirs(out_dir, exist_ok=True)
     
-    test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d))]
+    test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d)) and d != 'good']
     total_test_imgs = sum([len(glob.glob(os.path.join(test_dir_base, d, '*.png'))) for d in test_folders])
     if len(glob.glob(os.path.join(out_dir, '*.png'))) >= total_test_imgs:
         print(f"[{category}] Đã vẽ xong {total_test_imgs}/{total_test_imgs} ảnh. Tự động Resume bỏ qua class này!")
@@ -201,8 +201,8 @@ def run_visualization_for_category(category, data_path, backbone, snn_mode, T, b
         print(f"  {l}: mean={mean_val:.6f}, max={max_val:.6f}, std={std_val:.6f}, mAD={mad_val:.6f}")
     print()
 
-    # GET ALL TEST IMAGES (excluding 'good' folder if desired, but we'll run all)
-    test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d))]
+    # GET ALL TEST IMAGES (excluding 'good' folder)
+    test_folders = [d for d in os.listdir(test_dir_base) if os.path.isdir(os.path.join(test_dir_base, d)) and d != 'good']
     
     for t_folder in test_folders:
         t_paths = sorted(glob.glob(os.path.join(test_dir_base, t_folder, '*.png')))

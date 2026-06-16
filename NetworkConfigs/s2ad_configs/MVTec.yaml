@@ -9,7 +9,7 @@ Network:
   layers: layer123
   n_steps: 64
   save_anomaly_maps: true
-  snn_mode: '0.8'
+  snn_mode: '0.6'
   timesteps:
   - 64
   use_membrane: false

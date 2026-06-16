@@ -7,7 +7,7 @@ from run_grid_ablation import MVTEC_CLASSES
 
 def process_layer_ablation():
     dataset = 'mvtec'
-    TARGET_MODE = '0.8'
+    TARGET_MODE = '0.6'
     TS = 32
     
     results_dir = f'./results_paper_layer_ablation'
@@ -39,8 +39,8 @@ def process_layer_ablation():
         {'layers': 'layer13', 'combine': 'average'},
         {'layers': 'layer23', 'combine': 'average'},
         {'layers': 'layer123', 'combine': 'average'},
-        # MAD Weighting
-        {'layers': 'layer123', 'combine': 'mad_weighted'},
+        # MAD Weighting (Full S2AD) - Đã chạy rồi nên bỏ qua
+        # {'layers': 'layer123', 'combine': 'mad_weighted'},
     ]
         
     for cls in MVTEC_CLASSES:
@@ -59,6 +59,8 @@ def process_layer_ablation():
             temp_config = base_config.copy()
             temp_config['Network']['snn_mode'] = TARGET_MODE
             temp_config['Network']['timesteps'] = [TS]
+            temp_config['Network']['batch_size'] = 8
+            temp_config['Network']['calib_samples'] = -1
             temp_config['Network']['save_anomaly_maps'] = False
             temp_config['Network']['layers'] = layers
             temp_config['Network']['combine_method'] = combine
@@ -76,6 +78,7 @@ def process_layer_ablation():
                 "-category", cls,
                 "-config", temp_config_path,
                 "-alpha", "0.01",
+                "-seed", "42",
                 "-project_save_path", temp_save_path
             ]
             

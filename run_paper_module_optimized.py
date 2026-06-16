@@ -6,7 +6,7 @@ import shutil
 from run_grid_ablation import MVTEC_CLASSES, VISA_CLASSES
 
 def process_paper_module(dataset):
-    TARGET_MODE = '0.6' if dataset == 'visa' else '0.8'
+    TARGET_MODE = '0.6'
     TS = 32
     
     results_dir = f'./results_paper_module_{dataset}'
@@ -33,9 +33,9 @@ def process_paper_module(dataset):
     exp_modules = [
         {'name': 'No_mAD_No_ZScore', 'combine': 'average', 'zscore': False},
         {'name': 'mAD_Only', 'combine': 'mad_weighted', 'zscore': False},
-        {'name': 'ZScore_Only', 'combine': 'average', 'zscore': True},
-        {'name': 'Full_S2AD_Proposed', 'combine': 'mad_weighted', 'zscore': True}
     ]
+    if dataset == 'visa':
+        exp_modules.append({'name': 'ZScore_Only', 'combine': 'average', 'zscore': True})
         
     for cls in classes:
         for exp in exp_modules:
@@ -52,6 +52,8 @@ def process_paper_module(dataset):
             temp_config = base_config.copy()
             temp_config['Network']['snn_mode'] = TARGET_MODE
             temp_config['Network']['timesteps'] = [TS]
+            temp_config['Network']['batch_size'] = 8
+            temp_config['Network']['calib_samples'] = -1
             temp_config['Network']['save_anomaly_maps'] = False
             temp_config['Network']['combine_method'] = exp['combine']
             temp_config['Network']['use_zscore'] = exp['zscore']
@@ -68,6 +70,7 @@ def process_paper_module(dataset):
                 "-category", cls,
                 "-config", temp_config_path,
                 "-alpha", "0.01",
+                "-seed", "42",
                 "-project_save_path", temp_save_path
             ]
             

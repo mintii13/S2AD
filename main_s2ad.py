@@ -631,7 +631,7 @@ def main():
     firing_rate_stats = {}
     for T in timesteps:
         start_train = time.time()
-        normal_stats = compute_normal_stats(snn_encoder, train_loader, device, T, layers)
+        normal_stats = compute_normal_stats(snn_encoder, calib_loader, device, T, layers)
         train_time = time.time() - start_train
         
         firing_rate_stats[T] = {}

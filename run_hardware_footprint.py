@@ -227,21 +227,28 @@ def get_real_firing_rate():
         return 0.35
 
 def get_real_metrics():
-    import pandas as pd
-    csv_path = './results_paper_module_mvtec/table4_module_mvtec_summary.csv'
-    if os.path.exists(csv_path):
+    import os
+    
+    txt_path = '/home/minhtringuyen/ESVAE/results_grid_mains2ad_mvtec/paper_tables_summary/table9_timestep_mvtec.txt'
+    if os.path.exists(txt_path):
         try:
-            df = pd.read_csv(csv_path)
-            # Lấy dòng mAD_Only (hoặc bất kỳ dòng nào vì toán học là tương đương)
-            if 'mAD_Only' in df['Config_Name'].values:
-                row = df[df['Config_Name'] == 'mAD_Only'].iloc[0]
-                pro = row['PRO'] * 100 if row['PRO'] < 1 else row['PRO']
-                mad = row['mAD'] * 100 if row['mAD'] < 1 else row['mAD']
-                print(f"✅ Đã đọc được MVTec Average thực tế từ Module Ablation: PRO={pro:.2f}%, mAD={mad:.2f}%")
-                return pro, mad
+            with open(txt_path, 'r') as f:
+                lines = f.readlines()
+                for line in lines:
+                    parts = line.split('|')
+                    if len(parts) > 10:
+                        # Extract T
+                        t_str = parts[0].strip()
+                        if t_str == '32':
+                            pro = float(parts[7].strip())
+                            mad = float(parts[8].strip())
+                            print(f"✅ Đã lấy điểm số thực tế từ Table 9 (T=32): PRO={pro:.2f}%, mAD={mad:.2f}%")
+                            return pro, mad
         except Exception as e:
+            print(f"⚠️ Lỗi khi đọc Table 9: {e}")
             pass
-    print("⚠️ Không tìm thấy kết quả Module Ablation. Dùng giá trị giả định (87.60, 85.10)")
+            
+    print("⚠️ Không tìm thấy kết quả trong Table 9. Dùng giá trị giả định (87.60, 85.10)")
     return 87.60, 85.10
 
 def main():
@@ -284,13 +291,21 @@ def main():
     print(f"  E_SOP = {E_SOP_FJ} fJ | E_MAC = {E_MAC_PJ} pJ | Firing Rate = {FIRING_RATE:.4f}")
     print("=" * 140)
     
-    header = f"{'Hardware Configuration':<30} | {'SOPs (G)':>8} | {'MACs (G)':>8} | {'Energy(mJ)':>10} | {'Params':>10} | {'FPS':>6} | {'PRO (%)':>8} | {'mAD (%)':>8}"
+    header = f"{'Hardware Configuration':<30} | {'SOPs (G)':>12} | {'MACs (G)':>12} | {'Energy(mJ)':>12} | {'Params':>10} | {'EncEnergy(mJ)':>13} | {'EncParams':>11} | {'FPS':>6} | {'PRO (%)':>8} | {'mAD (%)':>8}"
     print(header)
     print("-" * len(header))
     
     csv_path = os.path.join(results_dir, 'table11_hardware_footprint.csv')
     with open(csv_path, 'w') as f:
-        f.write("Config,SOPs_G,MACs_G,Energy_mJ,Synaptic_Params,FPS,PRO,mAD\n")
+        f.write("Config,SOPs_G,MACs_G,Energy_mJ,Synaptic_Params,Enc_Energy_mJ,Enc_Params,FPS,PRO,mAD\n")
+    
+    # VGG16 (layer123) properties (computed via THOP)
+    VGG_MACS_1_PASS = 20044578816.0
+    VGG_PARAMS = 14714688
+    
+    # Encoder is always an SNN in S2AD
+    enc_sops = VGG_MACS_1_PASS * 32 * FIRING_RATE
+    enc_energy_mj = compute_energy_mj(0, enc_sops)
     
     for cfg in configs:
         macs, sops, params = count_all_layers(
@@ -305,10 +320,10 @@ def main():
         macs_g = macs / 1e9
         fps = cfg['fps']
         
-        print(f"{cfg['name']:<30} | {sops_g:>8.2f} | {macs_g:>8.2f} | {energy_mj:>10.2f} | {params:>10,} | {fps:>6.1f} | {REAL_PRO:>8.2f} | {REAL_MAD:>8.2f}")
+        print(f"{cfg['name']:<30} | {sops_g:>12.8f} | {macs_g:>12.8f} | {energy_mj:>12.8f} | {params:>10,} | {enc_energy_mj:>13.4f} | {VGG_PARAMS:>11,} | {fps:>6.1f} | {REAL_PRO:>8.2f} | {REAL_MAD:>8.2f}")
         
         with open(csv_path, 'a') as f:
-            f.write(f"{cfg['name']},{sops_g:.4f},{macs_g:.4f},{energy_mj:.4f},{params},{fps},{REAL_PRO},{REAL_MAD}\n")
+            f.write(f"{cfg['name']},{sops_g:.8f},{macs_g:.8f},{energy_mj:.8f},{params},{enc_energy_mj:.4f},{VGG_PARAMS},{fps},{REAL_PRO},{REAL_MAD}\n")
     
     print(f"\nResults saved to: {csv_path}")
 

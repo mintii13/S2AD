@@ -39,8 +39,11 @@ def process_layer_ablation():
         {'layers': 'layer13', 'combine': 'average'},
         {'layers': 'layer23', 'combine': 'average'},
         {'layers': 'layer123', 'combine': 'average'},
-        # MAD Weighting (Full S2AD) - Đã chạy rồi nên bỏ qua
-        # {'layers': 'layer123', 'combine': 'mad_weighted'},
+        # MAD Weighting
+        {'layers': 'layer12', 'combine': 'mad_weighted'},
+        {'layers': 'layer13', 'combine': 'mad_weighted'},
+        {'layers': 'layer23', 'combine': 'mad_weighted'},
+        # {'layers': 'layer123', 'combine': 'mad_weighted'}, # Đã chạy rồi nên bỏ qua
     ]
         
     for cls in MVTEC_CLASSES:

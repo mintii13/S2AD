@@ -93,6 +93,7 @@ class BackboneEncoder(nn.Module):
         elif self.layers == 'layer2': return (outputs[1],)
         elif self.layers == 'layer3': return (outputs[2],)
         elif self.layers == 'layer12': return (outputs[0], outputs[1])
+        elif self.layers == 'layer13': return (outputs[0], outputs[2])
         elif self.layers == 'layer23': return (outputs[1], outputs[2])
         elif self.layers == 'layer123': return tuple(outputs)
         else: return (outputs[1], outputs[2])
@@ -136,7 +137,7 @@ def get_layer_indices_and_names(layers):
     mapping = {
         'layer1': ([0], ['layer1']), 'layer2': ([0], ['layer2']), 'layer3': ([0], ['layer3']),
         'layer12': ([0, 1], ['layer1', 'layer2']), 'layer23': ([0, 1], ['layer2', 'layer3']),
-        'layer13': ([0, 2], ['layer1', 'layer3']),
+        'layer13': ([0, 1], ['layer1', 'layer3']),
         'layer123': ([0, 1, 2], ['layer1', 'layer2', 'layer3']),
     }
     return mapping.get(layers, ([0, 1], ['layer2', 'layer3']))

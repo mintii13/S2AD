@@ -14,3 +14,6 @@ seaborn
 torch
 torchvision
 numpy
+thop
+Pillow
+requests

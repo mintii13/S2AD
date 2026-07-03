@@ -10,7 +10,8 @@ import random
 from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score
 from spikingjelly.activation_based import ann2snn, functional, layer
 import setproctitle
-
+import cv2
+import time
 import global_v as glv
 from network_parser import parse
 from datasets.load_dataset_snn import load_mvtec, load_visa
@@ -325,29 +326,16 @@ class HardwareFriendlyZScoreAbs(nn.Module):
 class HardwareFriendlyInterpolator(nn.Module):
     def __init__(self, in_shape, out_shape):
         super().__init__()
-        H_in, W_in = in_shape
-        H_out, W_out = out_shape
         self.in_shape = in_shape
         self.out_shape = out_shape
-        
-        if in_shape != out_shape:
-            # Biến phép nội suy thành các kết nối Neuromorphic Synapse (Linear Layer)
-            self.linear = nn.Linear(H_in * W_in, H_out * W_out, bias=False)
-            
-            # Dùng ma trận đơn vị để "trích xuất" chính xác bộ trọng số Bilinear
-            with torch.no_grad():
-                identity = torch.eye(H_in * W_in).view(H_in * W_in, 1, H_in, W_in)
-                mapped = F.interpolate(identity, size=(H_out, W_out), mode='bilinear', align_corners=False)
-                W_matrix = mapped.view(H_in * W_in, H_out * W_out)
-                self.linear.weight.data = W_matrix.t() # (out_features, in_features)
 
     def forward(self, x):
         if self.in_shape == self.out_shape:
             return x
-        B = x.shape[0]
-        x_flat = x.view(B, -1)
-        y_flat = self.linear(x_flat)
-        return y_flat.view(B, self.out_shape[0], self.out_shape[1])
+        # Use native interpolate to avoid 4GB dense weight matrix memory exhaustion
+        x = x.unsqueeze(1)
+        y = F.interpolate(x, size=self.out_shape, mode='bilinear', align_corners=False)
+        return y.squeeze(1)
 
 _interpolators_cache = {}
 def get_interpolator(in_shape, out_shape, device):
@@ -411,9 +399,7 @@ def score_image_batch(snn_encoder, img_tensor, normal_stats, device, timesteps, 
 
 def evaluate(snn_encoder, test_loader, normal_stats, device, timesteps, layers, img_size, use_membrane, combine_method, save_maps, maps_dir, category_name, use_zscore=True, alpha=0.0):
     """Evaluate using the EXACT same scoring logic as evaluate_fast_ablation, single pass, with optional map saving."""
-    import cv2
-    import time
-    from spikingjelly.activation_based import functional
+
     
     start_time = time.time()
     total_save_time = 0.0

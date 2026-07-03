@@ -1,10 +1,10 @@
-pycuda
+# pycuda
 tensorboard
 pyyaml
 tqdm
 matplotlib
 scipy
-clean-fid
+# clean-fid
 pandas
 spikingjelly
 setproctitle
